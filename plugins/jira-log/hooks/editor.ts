@@ -13,9 +13,24 @@ export const MAX_ROWS = 12
 // Jira refuses a description over 32,767 characters.
 const TEXT_LIMIT = 32_000
 
-const SPECIAL = new Set([
-  'up', 'down', 'left', 'right', 'return', 'tab', 'backspace', 'delete', 'pageup', 'pagedown', 'home', 'end', 'escape',
+// The terminal names the keys it maps (`up`, `return`, `backspace`, ...) and sends a space as `space`; a
+// browser-style surface would name them as the DOM does (`ArrowUp`, `Enter`, ` `). Both become one name here.
+const NAMED: Record<string, string> = {
+  up: 'up', arrowup: 'up', down: 'down', arrowdown: 'down', left: 'left', arrowleft: 'left', right: 'right',
+  arrowright: 'right', return: 'return', enter: 'return', backspace: 'backspace', delete: 'delete', del: 'delete',
+  home: 'home', end: 'end', space: 'space', spacebar: 'space',
+}
+
+// Keys that type nothing here.
+const IGNORED = new Set([
+  'tab', 'pageup', 'pagedown', 'escape', 'esc', 'insert', 'clear', 'center', 'undefined', 'unidentified', 'mouse',
+  'wheelup', 'wheeldown', 'shift', 'control', 'ctrl', 'alt', 'meta', 'os', 'capslock', 'numlock', 'scrolllock',
+  'pause', 'printscreen', 'contextmenu', 'dead', 'process', ...Array.from({ length: 24 }, (_, n) => `f${n + 1}`),
 ])
+
+const nameOf = (key: string) => (key.length > 1 ? NAMED[key.toLowerCase()] : undefined)
+
+const isIgnored = (key: string) => key === '' || (key.length > 1 && IGNORED.has(key.toLowerCase()))
 
 export const editorOf = (text: string): Editor => ({ text, cursor: text.length, top: 0, isActive: false })
 
@@ -79,7 +94,10 @@ function keyed(editor: Editor, { key, ctrl, meta }: EditorKey, width: number): E
   const rows = rowsOf(text, width)
   const row = rowAt(rows, cursor)
   const column = cursor - (rows[row]?.start ?? 0)
-  switch (key) {
+  if (isIgnored(key)) return active
+  switch (nameOf(key)) {
+    case 'space':
+      return insert(active, ' ')
     case 'return':
       return insert(active, '\n')
     case 'backspace':
@@ -99,7 +117,7 @@ function keyed(editor: Editor, { key, ctrl, meta }: EditorKey, width: number): E
     case 'end':
       return { ...active, cursor: lastIn(rows, row) }
     default:
-      return SPECIAL.has(key) ? active : insert(active, key)
+      return insert(active, key)
   }
 }
 

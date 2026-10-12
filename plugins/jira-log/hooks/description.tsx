@@ -38,12 +38,13 @@ const Description: ClientModule<DescriptionProps, Editor> = (props, surface) => 
     }
     const at = editor.cursor - row.start
 
+    // One run of text with the cursor cell nested in it, so the spaces beside the cursor stay where they are.
     return (
-      <Box key={`row-${index}`} flexDirection="row">
-        {at > 0 && <Text>{text.slice(0, at)}</Text>}
+      <Text key={`row-${index}`}>
+        {text.slice(0, at)}
         <Text inverse>{text.charAt(at) || ' '}</Text>
-        {at + 1 < text.length && <Text>{text.slice(at + 1)}</Text>}
-      </Box>
+        {text.slice(at + 1)}
+      </Text>
     )
   })
   const isBlank = editor.text === '' && !editor.isActive
