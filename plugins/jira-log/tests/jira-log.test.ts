@@ -26,6 +26,7 @@ import {
   toSprints,
   UPDATE_RULES,
 } from '../hooks/format'
+import { editorOf, MAX_ROWS, rowsOf, viewOf, withKey } from '../hooks/editor'
 
 const CONFIG = { site: 'https://team.atlassian.net', email: 'me@example.com', tokenBlob: 'sealed' }
 const MOVES = [
@@ -363,7 +364,10 @@ test('a ticket written by hand is created without asking the model, in the sprin
   expect((await pane.find({ key: 'type' }))?.props.value).toBe('Task')
 
   await pane.input({ key: 'summary', text: '  Add CSV export  ', kind: 'change' })
-  await pane.input({ key: 'description', text: 'Let people export the report.', kind: 'change' })
+  // A paste reaches the area as one key; Enter starts a new line.
+  await pane.key({ key: 'Let people export the report.', in: 'description' })
+  await pane.key({ key: 'return', in: 'description' })
+  for (const key of 'Done when it downloads.') await pane.key({ key, in: 'description' })
   await pane.select({ key: 'sprint', value: '43' })
   expect(await pane.find({ key: 'revise-issue' })).toBeDefined()
   await pane.press({ key: 'create' })
@@ -374,7 +378,10 @@ test('a ticket written by hand is created without asking the model, in the sprin
     project: { key: 'CPC' },
     summary: 'Add CSV export',
     issuetype: { name: 'Task' },
-    description: toIssueDocument({ ...emptyIssue('Task'), description: 'Let people export the report.' }),
+    description: toIssueDocument({
+      ...emptyIssue('Task'),
+      description: 'Let people export the report.\nDone when it downloads.',
+    }),
   })
   expect(sprinted).toEqual([{ sprint: '43', issues: ['CPC-2'] }])
   expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
@@ -388,9 +395,9 @@ test('a drafted ticket can be edited in the form and left in the backlog', async
   await $.command.run({ command: 'jira', args: 'new' })
   const pane = await $.ui.mount(CREATE_PANE)
   expect((await pane.find({ key: 'summary' }))?.props.value).toBe('Add CSV export')
-  expect((await pane.find({ key: 'description' }))?.props.value).toBe('Write the export.')
+  expect((await pane.find({ key: 'description' }))?.props.props).toMatchObject({ text: 'Write the export.' })
   await pane.input({ key: 'summary', text: 'Export the report as CSV', kind: 'change' })
-  await pane.input({ key: 'description', text: '', kind: 'change' })
+  for (const _ of 'Write the export.') await pane.key({ key: 'backspace', in: 'description' })
   await pane.select({ key: 'sprint', value: 'backlog' })
   await pane.press({ key: 'create' })
   await pane.unmount()
@@ -399,6 +406,60 @@ test('a drafted ticket can be edited in the form and left in the backlog', async
   expect(created[0]?.fields.description).toEqual(toIssueDocument(emptyIssue('Task')))
   expect(sprinted).toEqual([])
   expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
+})
+
+test('a press in the description puts the cursor where it landed', async ($, on) => {
+  const { created } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+  on('model.fork', drafting([], '{"summary": "Add CSV export", "description": "Write the export."}'))
+
+  await $.command.run({ command: 'jira', args: 'new' })
+  const pane = await $.ui.mount(CREATE_PANE)
+  await pane.resize({ columns: 40, rows: 6, in: 'description' })
+  // Past the border and a column of padding, on the first text row: before "the".
+  await pane.pointer({ type: 'down', x: 2 + 6, y: 1, button: 'left', in: 'description' })
+  for (const key of 'CSV ') await pane.key({ key, in: 'description' })
+  await pane.press({ key: 'create' })
+  await pane.unmount()
+
+  expect(created[0]?.fields.description).toEqual(
+    toIssueDocument({ ...emptyIssue('Task'), description: 'Write CSV the export.' }),
+  )
+})
+
+test('VS Code draws no Client, so its description is a one-line field', async ($, on) => {
+  fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+
+  await $.command.run({ command: 'jira', args: 'new --manual' })
+  const pane = await $.ui.mount({ ...CREATE_PANE, surface: 'vscode' })
+  expect((await pane.find({ key: 'description' }))?.type).toBe('Input')
+  await pane.unmount()
+})
+
+test('the description area wraps at words and moves the cursor by visual row', async () => {
+  const text = 'Let people export the report\nDone'
+  const rows = rowsOf(text, 12)
+
+  expect(rows.map(row => text.slice(row.start, row.end))).toEqual(['Let people ', 'export the ', 'report', 'Done'])
+  expect(rowsOf('abcdefghij', 4).map(row => row.end - row.start)).toEqual([4, 4, 2])
+
+  const at = (cursor: number) => ({ ...editorOf(text), cursor })
+  expect(withKey(at(4), { key: 'down' }, 12).cursor).toBe(15)
+  expect(withKey(at(15), { key: 'up' }, 12).cursor).toBe(4)
+  expect(withKey(at(4), { key: 'end' }, 12).cursor).toBe(10)
+  expect(withKey(at(29), { key: 'backspace' }, 12).text).toBe('Let people export the reportDone')
+  expect(withKey(at(0), { key: 'up' }, 12).cursor).toBe(0)
+})
+
+test('the description area takes pastes whole, ignores shortcuts, and scrolls past its height', async () => {
+  const pasted = withKey(editorOf(''), { key: 'one\r\ntwo' }, 20)
+
+  expect(pasted).toMatchObject({ text: 'one\ntwo', cursor: 7, isActive: true })
+  expect(withKey(pasted, { key: 'c', ctrl: true }, 20).text).toBe('one\ntwo')
+  expect(withKey(pasted, { key: 'tab' }, 20).text).toBe('one\ntwo')
+
+  const long = editorOf(Array.from({ length: 20 }, (_, n) => `line ${n}`).join('\n'))
+  expect(viewOf(long, rowsOf(long.text, 20))).toEqual({ height: MAX_ROWS, top: 20 - MAX_ROWS })
+  expect(viewOf(editorOf('one'), rowsOf('one', 20))).toEqual({ height: 4, top: 0 })
 })
 
 test('without Jira Software there is no sprint to pick and the issue goes to the backlog', async ($, on) => {
@@ -429,7 +490,7 @@ test('a revision rewrites the title and description and keeps the type and sprin
 
   expect(prompts[0]).toContain('{"summary":"Add CSV export","description":""}')
   expect((await pane.find({ key: 'summary' }))?.props.value).toBe('Fix the login page')
-  expect((await pane.find({ key: 'description' }))?.props.value).toBe('Stop the login loop.')
+  expect((await pane.find({ key: 'description' }))?.props.props).toMatchObject({ text: 'Stop the login loop.' })
   expect((await pane.find({ key: 'type' }))?.props.value).toBe('Story')
   expect((await pane.find({ key: 'sprint' }))?.props.value).toBe('43')
   await pane.unmount()

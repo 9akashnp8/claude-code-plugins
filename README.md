@@ -37,6 +37,8 @@ The token is encrypted with Windows DPAPI before it is stored, so it opens only 
 | `/jira status` | Moves the linked issue to any status its workflow allows, such as Done |
 | `/jira unlink` | Removes the link |
 
+The description is a text area: click it to type, Enter starts a new line and Esc leaves it. It grows with the text up to 12 rows, then scrolls. Each line becomes a paragraph in Jira. In VS Code, which draws no such area, it is a one-line field.
+
 A new issue goes into the project's current sprint unless you pick a future sprint or **Backlog** in the form. The sprints are the active and future ones on the project's scrum boards. When the site has no Jira Software, or the project has no scrum board, the form shows no sprint and the issue goes to the backlog.
 
 Running `/jira update` again on the same day replaces that day's comment, unless someone edited it in Jira since; then a new comment is added.
