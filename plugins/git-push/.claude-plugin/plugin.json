@@ -1,6 +1,6 @@
 {
   "name": "git-push",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pushes the branch and opens its Azure DevOps pull request from buttons above the prompt, then shows the pull request's status there.",
   "author": { "name": "Akash N. Rao" },
   "types": "./types/index.d.ts"

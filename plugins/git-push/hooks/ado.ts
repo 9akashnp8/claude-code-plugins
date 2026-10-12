@@ -225,7 +225,17 @@ $out = @(foreach ($r in $in.requests) {
   } catch [Net.WebException] {
     $x = $_.Exception.Response
     if ($null -eq $x) { throw }
-    @{ status = [int]$x.StatusCode; text = (New-Object IO.StreamReader($x.GetResponseStream())).ReadToEnd() }
+    # Invoke-WebRequest has already drained the response stream by now: the body is in ErrorDetails.
+    $t = ''
+    if ($_.ErrorDetails) { $t = [string]$_.ErrorDetails.Message }
+    if ($t -eq '') {
+      try {
+        $s = $x.GetResponseStream()
+        if ($s.CanSeek) { $s.Position = 0 }
+        $t = (New-Object IO.StreamReader($s)).ReadToEnd()
+      } catch { }
+    }
+    @{ status = [int]$x.StatusCode; text = $t }
   }
 })
 $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $out -Compress -Depth 3))
