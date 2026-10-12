@@ -299,6 +299,11 @@ const CREATE_PANE = {
   props: { title: 'Jira', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 } },
 } as const
 
+// Types into the description area key by key, as the terminal sends them: a space comes as `space`.
+const typeInto = async (pane: { key: (event: { key: string; in?: string }) => Promise<void> }, text: string) => {
+  for (const key of text) await pane.key({ key: key === ' ' ? 'space' : key, in: 'description' })
+}
+
 const drafting = (prompts: string[], text: string) => ($: unknown, e: { prompt: string }) => {
   prompts.push(e.prompt)
   return {
@@ -367,7 +372,7 @@ test('a ticket written by hand is created without asking the model, in the sprin
   // A paste reaches the area as one key; Enter starts a new line.
   await pane.key({ key: 'Let people export the report.', in: 'description' })
   await pane.key({ key: 'return', in: 'description' })
-  for (const key of 'Done when it downloads.') await pane.key({ key, in: 'description' })
+  await typeInto(pane, 'Done when it downloads.')
   await pane.select({ key: 'sprint', value: '43' })
   expect(await pane.find({ key: 'revise-issue' })).toBeDefined()
   await pane.press({ key: 'create' })
@@ -417,7 +422,7 @@ test('a press in the description puts the cursor where it landed', async ($, on)
   await pane.resize({ columns: 40, rows: 6, in: 'description' })
   // Past the border and a column of padding, on the first text row: before "the".
   await pane.pointer({ type: 'down', x: 2 + 6, y: 1, button: 'left', in: 'description' })
-  for (const key of 'CSV ') await pane.key({ key, in: 'description' })
+  await typeInto(pane, 'CSV ')
   await pane.press({ key: 'create' })
   await pane.unmount()
 
@@ -456,6 +461,12 @@ test('the description area takes pastes whole, ignores shortcuts, and scrolls pa
   expect(pasted).toMatchObject({ text: 'one\ntwo', cursor: 7, isActive: true })
   expect(withKey(pasted, { key: 'c', ctrl: true }, 20).text).toBe('one\ntwo')
   expect(withKey(pasted, { key: 'tab' }, 20).text).toBe('one\ntwo')
+  expect(withKey(pasted, { key: 'space' }, 20).text).toBe('one\ntwo ')
+  expect(withKey(pasted, { key: 'Shift' }, 20).text).toBe('one\ntwo')
+  expect(withKey(pasted, { key: 'F5' }, 20).text).toBe('one\ntwo')
+  expect(withKey(pasted, { key: 'ArrowLeft' }, 20).cursor).toBe(6)
+  expect(withKey(pasted, { key: 'Enter' }, 20).text).toBe('one\ntwo\n')
+  expect(withKey(pasted, { key: 'Backspace' }, 20).text).toBe('one\ntw')
 
   const long = editorOf(Array.from({ length: 20 }, (_, n) => `line ${n}`).join('\n'))
   expect(viewOf(long, rowsOf(long.text, 20))).toEqual({ height: MAX_ROWS, top: 20 - MAX_ROWS })
