@@ -4,6 +4,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   addArtifact,
   cappedSummary,
+  currentSprint,
   dayBefore,
   earlierDaysIn,
   emptyIssue,
@@ -11,17 +12,19 @@ import {
   isIssueReady,
   isReviewTool,
   newIssuePrompt,
+  parseNewIssue,
   parseSuggestion,
   parseUpdate,
   progressOf,
   publishedArtifactOf,
   relativeTo,
   reviewRequestOf,
+  sprintOf,
+  sprintValue,
   toDocument,
   toIssueDocument,
+  toSprints,
   UPDATE_RULES,
-  withListItem,
-  withoutListItem,
 } from '../hooks/format'
 
 const CONFIG = { site: 'https://team.atlassian.net', email: 'me@example.com', tokenBlob: 'sealed' }
@@ -30,11 +33,20 @@ const MOVES = [
   { id: '31', name: 'Send to review', to: { name: 'In Review', statusCategory: { key: 'indeterminate' } } },
 ]
 
+// One scrum board whose sprint 41 has ended, 42 is under way and 43 is next.
+const SPRINTS = [
+  { id: 41, name: 'CPC Sprint 11', state: 'closed' },
+  { id: 42, name: 'CPC Sprint 12', state: 'active' },
+  { id: 43, name: 'CPC Sprint 13', state: 'future' },
+]
+
 // Stands in for Jira, PowerShell and the session beneath the plugin; answers with what was sent.
-function fakeJira(on: On, entries: Record<string, unknown> = {}) {
+// Without `hasSprints` the site has no Jira Software, so its board API answers 404.
+function fakeJira(on: On, entries: Record<string, unknown> = {}, hasSprints = true) {
   const sent: string[] = []
   const toasts: string[] = []
   const created: { fields: Record<string, unknown> }[] = []
+  const sprinted: { sprint: string; issues: string[] }[] = []
   let status = { name: 'To Do', statusCategory: { key: 'new' } }
   mock.store(on, { config: CONFIG, ...entries })
   const clock = mock.clock(on, { now: new Date(2026, 9, 6, 9, 30).getTime() })
@@ -57,6 +69,16 @@ function fakeJira(on: On, entries: Record<string, unknown> = {}) {
     sent.push(`${method} ${path}`)
     const json = (body: unknown) => ({ value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } })
     const empty = { value: { status: 204, ok: true, headers: {}, text: '' } }
+    if (path.startsWith('/rest/agile/') && !hasSprints) {
+      return { value: { status: 404, ok: false, headers: {}, text: '{"errorMessages": ["Not found"]}' } }
+    }
+    if (path.startsWith('/rest/agile/1.0/board?')) return json({ values: [{ id: 7, type: 'scrum' }] })
+    if (path.startsWith('/rest/agile/1.0/board/7/sprint')) return json({ values: SPRINTS })
+    const sprint = path.match(/^\/rest\/agile\/1\.0\/sprint\/(\d+)\/issue$/)?.[1]
+    if (sprint !== undefined) {
+      sprinted.push({ sprint, issues: (JSON.parse(e.init?.body ?? '{}') as { issues: string[] }).issues })
+      return empty
+    }
     if (path.endsWith('/transitions') && method === 'GET') return json({ transitions: MOVES })
     if (path.endsWith('/transitions')) {
       const { transition } = JSON.parse(e.init?.body ?? '{}') as { transition: { id: string } }
@@ -77,7 +99,7 @@ function fakeJira(on: On, entries: Record<string, unknown> = {}) {
     return json({ key, fields: { summary: 'Build the thing', status } })
   })
 
-  return { sent, toasts, created, clock }
+  return { sent, toasts, created, sprinted, clock }
 }
 
 const BAND = {
@@ -268,52 +290,6 @@ test('a suggested move must be one the workflow allows from here', async () => {
   expect(parseSuggestion('{"notes": []}', moves, 'In Progress')).toBeNull()
 })
 
-test('a drafted issue is created, assigned, linked and started', async ($, on) => {
-  const { sent, toasts, created } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
-  const prompts: string[] = []
-  on('model.fork', ($, e) => {
-    prompts.push(e.prompt)
-    return {
-      value: {
-        isAnswered: true,
-        text: '{"summary": "Add CSV export", "goal": "Let people export the report.", "scope": ["Write the CSV export"], ' +
-          '"acceptance": ["The report downloads as CSV", " "], "notes": []}',
-        usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-      },
-    }
-  })
-
-  await $.command.run({ command: 'jira', args: 'new  a ticket for the CSV export' })
-  const pane = await $.ui.mount({
-    plugin: 'jira-log',
-    surface: 'terminal',
-    component: 'Pane',
-    requestId: 'jira',
-    props: { title: 'Jira', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 } },
-  })
-  expect((await pane.find({ key: 'type' }))?.props.value).toBe('Task')
-  await pane.press({ key: 'create' })
-  await pane.unmount()
-
-  expect(prompts[0]).toContain('The person asked for: "a ticket for the CSV export".')
-  expect(created[0]?.fields).toEqual({
-    project: { key: 'CPC' },
-    summary: 'Add CSV export',
-    issuetype: { name: 'Task' },
-    description: toIssueDocument({
-      summary: 'Add CSV export',
-      goal: 'Let people export the report.',
-      scope: ['Write the CSV export'],
-      acceptance: ['The report downloads as CSV'],
-      notes: [],
-      issueType: 'Task',
-    }),
-  })
-  expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
-  expect(sent).toContain('POST /rest/api/3/issue/CPC-2/transitions')
-  expect(toasts).toContain('Linked this worktree to CPC-2')
-})
-
 const CREATE_PANE = {
   plugin: 'jira-log',
   surface: 'terminal',
@@ -322,8 +298,53 @@ const CREATE_PANE = {
   props: { title: 'Jira', isFocused: true, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 20 } },
 } as const
 
-test('a ticket written by hand is created without asking the model', async ($, on) => {
-  const { sent, toasts, created } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+const drafting = (prompts: string[], text: string) => ($: unknown, e: { prompt: string }) => {
+  prompts.push(e.prompt)
+  return {
+    value: {
+      isAnswered: true as const,
+      text,
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    },
+  }
+}
+
+test('a drafted issue is created in the current sprint, assigned, linked and started', async ($, on) => {
+  const { sent, toasts, created, sprinted } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+  const prompts: string[] = []
+  on('model.fork', drafting(prompts, '{"summary": "Add CSV export", "description": "Let people export the report."}'))
+
+  await $.command.run({ command: 'jira', args: 'new  a ticket for the CSV export' })
+  const pane = await $.ui.mount(CREATE_PANE)
+  expect((await pane.find({ key: 'type' }))?.props.value).toBe('Task')
+  expect((await pane.find({ key: 'sprint' }))?.props.value).toBe('42')
+  expect((await pane.find({ key: 'sprint' }))?.props.options).toEqual([
+    { value: '42', label: 'CPC Sprint 12 (current)' },
+    { value: '43', label: 'CPC Sprint 13' },
+    { value: 'backlog', label: 'Backlog' },
+  ])
+  await pane.press({ key: 'create' })
+  await pane.unmount()
+
+  expect(prompts[0]).toContain('The person asked for: "a ticket for the CSV export".')
+  expect(created[0]?.fields).toEqual({
+    project: { key: 'CPC' },
+    summary: 'Add CSV export',
+    issuetype: { name: 'Task' },
+    description: {
+      type: 'doc',
+      version: 1,
+      content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Let people export the report.' }] }],
+    },
+  })
+  expect(sprinted).toEqual([{ sprint: '42', issues: ['CPC-2'] }])
+  expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
+  expect(sent).toContain('POST /rest/api/3/issue/CPC-2/transitions')
+  expect(toasts).toContain('Linked this worktree to CPC-2')
+})
+
+test('a ticket written by hand is created without asking the model, in the sprint picked', async ($, on) => {
+  const { sent, toasts, created, sprinted } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
   let asked = 0
   on('model.fork', () => {
     asked += 1
@@ -336,13 +357,14 @@ test('a ticket written by hand is created without asking the model', async ($, o
 
   await $.command.run({ command: 'jira', args: 'new --manual' })
   const pane = await $.ui.mount(CREATE_PANE)
-  // Nothing can be created, or revised by the model, until there is a summary.
+  // Nothing can be created, or revised by the model, until there is a title.
   expect(await pane.find({ key: 'create' })).toBeUndefined()
   expect(await pane.find({ key: 'revise-issue' })).toBeUndefined()
   expect((await pane.find({ key: 'type' }))?.props.value).toBe('Task')
 
   await pane.input({ key: 'summary', text: '  Add CSV export  ', kind: 'change' })
-  await pane.input({ key: 'goal', text: 'Let people export the report.', kind: 'change' })
+  await pane.input({ key: 'description', text: 'Let people export the report.', kind: 'change' })
+  await pane.select({ key: 'sprint', value: '43' })
   expect(await pane.find({ key: 'revise-issue' })).toBeDefined()
   await pane.press({ key: 'create' })
   await pane.unmount()
@@ -352,33 +374,65 @@ test('a ticket written by hand is created without asking the model', async ($, o
     project: { key: 'CPC' },
     summary: 'Add CSV export',
     issuetype: { name: 'Task' },
-    description: toIssueDocument({ ...emptyIssue('Task'), goal: 'Let people export the report.' }),
+    description: toIssueDocument({ ...emptyIssue('Task'), description: 'Let people export the report.' }),
   })
+  expect(sprinted).toEqual([{ sprint: '43', issues: ['CPC-2'] }])
   expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
   expect(toasts).toContain('Linked this worktree to CPC-2')
 })
 
-test('a drafted ticket can be edited in the form before it is created', async ($, on) => {
-  const { created } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
-  on('model.fork', () => ({
-    value: {
-      isAnswered: true,
-      text: '{"summary": "Add CSV export", "goal": "", "scope": ["Write the export"], "acceptance": [], "notes": []}',
-      usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-    },
-  }))
+test('a drafted ticket can be edited in the form and left in the backlog', async ($, on) => {
+  const { created, sent, sprinted } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+  on('model.fork', drafting([], '{"summary": "Add CSV export", "description": "Write the export."}'))
 
   await $.command.run({ command: 'jira', args: 'new' })
   const pane = await $.ui.mount(CREATE_PANE)
   expect((await pane.find({ key: 'summary' }))?.props.value).toBe('Add CSV export')
-  expect(await pane.find({ key: 'remove-scope-0' })).toBeDefined()
+  expect((await pane.find({ key: 'description' }))?.props.value).toBe('Write the export.')
   await pane.input({ key: 'summary', text: 'Export the report as CSV', kind: 'change' })
-  await pane.press({ key: 'remove-scope-0' })
+  await pane.input({ key: 'description', text: '', kind: 'change' })
+  await pane.select({ key: 'sprint', value: 'backlog' })
   await pane.press({ key: 'create' })
   await pane.unmount()
 
   expect(created[0]?.fields.summary).toBe('Export the report as CSV')
   expect(created[0]?.fields.description).toEqual(toIssueDocument(emptyIssue('Task')))
+  expect(sprinted).toEqual([])
+  expect(sent).toContain('PUT /rest/api/3/issue/CPC-2/assignee')
+})
+
+test('without Jira Software there is no sprint to pick and the issue goes to the backlog', async ($, on) => {
+  const { created, sprinted } = fakeJira(on, { config: { ...CONFIG, project: 'CPC' } }, false)
+
+  await $.command.run({ command: 'jira', args: 'new --manual' })
+  const pane = await $.ui.mount(CREATE_PANE)
+  expect(await pane.find({ key: 'sprint' })).toBeUndefined()
+  await pane.input({ key: 'summary', text: 'Add CSV export', kind: 'change' })
+  await pane.press({ key: 'create' })
+  await pane.unmount()
+
+  expect(created[0]?.fields.summary).toBe('Add CSV export')
+  expect(sprinted).toEqual([])
+})
+
+test('a revision rewrites the title and description and keeps the type and sprint', async ($, on) => {
+  fakeJira(on, { config: { ...CONFIG, project: 'CPC' } })
+  const prompts: string[] = []
+  on('model.fork', drafting(prompts, '{"summary": "Fix the login page", "description": "Stop the login loop."}'))
+
+  await $.command.run({ command: 'jira', args: 'new --manual' })
+  const pane = await $.ui.mount(CREATE_PANE)
+  await pane.input({ key: 'summary', text: 'Add CSV export', kind: 'change' })
+  await pane.select({ key: 'type', value: 'Story' })
+  await pane.select({ key: 'sprint', value: '43' })
+  await pane.input({ key: 'revise-issue', text: 'make it about the login page' })
+
+  expect(prompts[0]).toContain('{"summary":"Add CSV export","description":""}')
+  expect((await pane.find({ key: 'summary' }))?.props.value).toBe('Fix the login page')
+  expect((await pane.find({ key: 'description' }))?.props.value).toBe('Stop the login loop.')
+  expect((await pane.find({ key: 'type' }))?.props.value).toBe('Story')
+  expect((await pane.find({ key: 'sprint' }))?.props.value).toBe('43')
+  await pane.unmount()
 })
 
 test('the band offers a blank ticket beside the drafted one once Jira is set up', async ($, on) => {
@@ -390,16 +444,13 @@ test('the band offers a blank ticket beside the drafted one once Jira is set up'
   await ui.unmount()
 })
 
-test('a ticket needs only a summary, and its lists ignore blanks and repeats', async () => {
+test('a ticket needs only a title, capped at Jira’s limit', async () => {
   expect(isIssueReady(emptyIssue('Task'))).toBe(false)
   expect(isIssueReady({ ...emptyIssue('Task'), summary: '  ' })).toBe(false)
   expect(isIssueReady({ ...emptyIssue('Task'), summary: 'Add CSV export' })).toBe(true)
-
-  expect(withListItem(['Write it'], '  Test it ')).toEqual(['Write it', 'Test it'])
-  expect(withListItem(['Write it'], 'Write it')).toEqual(['Write it'])
-  expect(withListItem(['Write it'], '   ')).toEqual(['Write it'])
-  expect(withoutListItem(['a', 'b', 'c'], 1)).toEqual(['a', 'c'])
   expect(cappedSummary('x'.repeat(300))).toHaveLength(255)
+  expect(parseNewIssue(`{"summary": "${'x'.repeat(300)}"}`)).toEqual({ summary: 'x'.repeat(255), description: '' })
+  expect(() => parseNewIssue('{"summary": " ", "description": "Something"}')).toThrow('the model drafted no summary')
 })
 
 test('without a focus the ticket covers the main work of the conversation', async () => {
@@ -407,23 +458,36 @@ test('without a focus the ticket covers the main work of the conversation', asyn
   expect(newIssuePrompt('')).not.toContain('The person asked for')
 })
 
-test('a ticket is its goal, then a heading and a list per filled section', async () => {
-  const document = toIssueDocument({
-    summary: 'Add CSV export',
-    goal: 'Let people export the report.',
-    scope: ['Write the CSV export', 'Add a download button'],
-    acceptance: ['The report downloads as CSV'],
-    notes: [],
-    issueType: 'Task',
-  })
+test('a ticket’s description is a paragraph per line, with no headings', async () => {
+  const issue = { ...emptyIssue('Task'), description: 'Let people export the report.\r\n\r\n  Done when it downloads. ' }
 
-  expect(document.content.map(block => block.type)).toEqual(['paragraph', 'heading', 'bulletList', 'heading', 'bulletList'])
-  expect(document.content[1]).toEqual({ type: 'heading', attrs: { level: 4 }, content: [{ type: 'text', text: 'Scope' }] })
-  expect(document.content[3]).toEqual({
-    type: 'heading',
-    attrs: { level: 4 },
-    content: [{ type: 'text', text: 'Acceptance criteria' }],
-  })
+  expect(toIssueDocument(issue).content).toEqual([
+    { type: 'paragraph', content: [{ type: 'text', text: 'Let people export the report.' }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'Done when it downloads.' }] },
+  ])
+  expect(toIssueDocument(emptyIssue('Task')).content).toEqual([])
+})
+
+test('the current sprint comes first, then the future ones, each once; closed ones are left out', async () => {
+  const sprints = toSprints([
+    [
+      { id: 43, name: 'Sprint 13', state: 'future' },
+      { id: 41, name: 'Sprint 11', state: 'closed' },
+    ],
+    [
+      { id: 42, name: 'Sprint 12', state: 'active' },
+      { id: 43, name: 'Sprint 13', state: 'future' },
+    ],
+  ])
+
+  expect(sprints).toEqual([
+    { id: 42, name: 'Sprint 12', state: 'active' },
+    { id: 43, name: 'Sprint 13', state: 'future' },
+  ])
+  expect(currentSprint(sprints)).toBe(42)
+  expect(currentSprint(sprints.slice(1))).toBeNull()
+  expect(sprintOf(sprintValue(null))).toBeNull()
+  expect(sprintOf(sprintValue(43))).toBe(43)
 })
 
 test('a fenced model reply parses into its notes, dropping anything that is not one', async () => {

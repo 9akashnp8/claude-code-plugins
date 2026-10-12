@@ -2,14 +2,15 @@ export type JiraIssue = { key: string; summary: string; status: string; statusCa
 
 export type JiraUpdate = { notes: string[] }
 
+// `sprint` is the id of the sprint the issue goes into once created; null leaves it in the backlog.
 export type JiraNewIssue = {
   summary: string
-  goal: string
-  scope: string[]
-  acceptance: string[]
-  notes: string[]
+  description: string
   issueType: string
+  sprint: number | null
 }
+
+export type JiraSprint = { id: number; name: string; state: 'active' | 'future' }
 
 export type JiraTransition = { id: string; name: string; to: string }
 
@@ -40,6 +41,7 @@ declare module 'claude-code' {
       suggestion: JiraSuggestion | null
       newIssue: JiraNewIssue | null
       issueTypes: string[]
+      sprints: JiraSprint[]
       transitions: JiraTransition[]
       busy: string | null
       notice: string | null

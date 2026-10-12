@@ -31,11 +31,13 @@ The token is encrypted with Windows DPAPI before it is stored, so it opens only 
 | `/jira` | Shows which issue this worktree is linked to |
 | `/jira setup` | Opens the connection form |
 | `/jira link [KEY]` | Links this worktree to an issue; without a key, opens the picker |
-| `/jira new [what for]` | Drafts a ticket (goal, scope, acceptance criteria) from the conversation, focused on what you type after `new` if anything: pick its type, revise it, then create and link it |
-| `/jira new --manual` | Opens a blank ticket form (summary, goal, scope, acceptance criteria, notes) and never asks the model; the band's **Write it myself** button does the same. Every drafted ticket can be edited in the same form |
+| `/jira new [what for]` | Drafts a ticket (a title and a short description) from the conversation, focused on what you type after `new` if anything: pick its type and sprint, revise it, then create and link it |
+| `/jira new --manual` | Opens a blank ticket form (title, description, type, sprint) and never asks the model; the band's **Write it myself** button does the same. Every drafted ticket can be edited in the same form |
 | `/jira update` | Drafts today's comment in the Jira pane: revise it, post it or discard it |
 | `/jira status` | Moves the linked issue to any status its workflow allows, such as Done |
 | `/jira unlink` | Removes the link |
+
+A new issue goes into the project's current sprint unless you pick a future sprint or **Backlog** in the form. The sprints are the active and future ones on the project's scrum boards. When the site has no Jira Software, or the project has no scrum board, the form shows no sprint and the issue goes to the backlog.
 
 Running `/jira update` again on the same day replaces that day's comment, unless someone edited it in Jira since; then a new comment is added.
 
