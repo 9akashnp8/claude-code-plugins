@@ -66,9 +66,10 @@ A toast says whether the push worked, or the line from git that says why not. Th
 
 When `origin` is an Azure DevOps repository (Azure DevOps Server, such as `https://server/tfs/Collection/Project/_git/Repo`, or Azure DevOps Services) and the branch is on it with nothing left to push, the line shows **Create PR**:
 
-1. Claude drafts a title and description from the conversation and the branch's commits. A Jira key named in the conversation starts the title.
-2. The draft opens in the Pull request pane: edit the title, ask for a revision in your own words, then press **Create pull request**. It targets the repository's default branch.
-3. A note in the conversation records the pull request, so Claude and `jira-log`'s next update know it is up.
+1. The plugin fetches `origin` and picks the branch to merge into: the branch yours was most likely cut from. That is the `origin` branch missing the fewest of your branch's commits, then the one with the fewest commits of its own, with the repository's default branch winning a tie. A branch cut from `dev` merges into `dev`. With git older than 2.41, which cannot measure this, it uses the default branch.
+2. Claude drafts a title and description from the commits and changed files between that branch and yours, using the conversation only for why the change is needed and how it was tested. A Jira key named in the conversation starts the title.
+3. The draft opens in the Pull request pane: pick another branch under **Into** (the draft is written again for it), edit the title, ask for a revision in your own words, then press **Create pull request**.
+4. A note in the conversation records the pull request, so Claude and `jira-log`'s next update know it is up.
 
 From then on the line follows the pull request, checking every minute: `PR #12 · Active · 1 of 2 approved · checks running`. Conflicts, a rejection or a failed check turn it red, changes requested yellow, and a merged pull request shows **Merged** in the merge purple. `PR #12` opens it in the browser. A pull request opened in the browser shows up too.
 

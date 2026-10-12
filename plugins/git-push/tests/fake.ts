@@ -11,6 +11,9 @@ export type Repo = {
   remote: string
   // What git credential fill prints; empty when no helper holds one.
   credential: string
+  // What git for-each-ref prints for origin's branches: "<name> <its commits HEAD lacks> <HEAD's commits it lacks>".
+  // Null for a git too old to know %(ahead-behind).
+  remoteBranches: string | null
 }
 
 export type Server = {
@@ -70,6 +73,7 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     pushError: null,
     remote: 'https://github.com/team/repo.git',
     credential: '',
+    remoteBranches: ['HEAD 0 0', 'feature/export 0 0', 'main 0 2'].join('\n'),
     ...start,
   }
   const server: Server = { accepts: ['basic'], pulls: [], evaluations: [], refuseCreate: null, requests: [], ...serverStart }
@@ -120,6 +124,12 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     if (command.startsWith('rev-list --count')) return answer(0, `${repo.ahead}\n`)
     if (command === 'credential fill') {
       return repo.credential === '' ? answer(128, '', 'fatal: terminal prompts disabled') : answer(0, repo.credential)
+    }
+    if (command === 'fetch --prune origin') return answer(0)
+    if (command.startsWith('for-each-ref')) {
+      return repo.remoteBranches === null
+        ? answer(128, '', 'fatal: unknown field name: ahead-behind:HEAD')
+        : answer(0, repo.remoteBranches)
     }
     if (command.startsWith('log ')) return answer(0, '- Add the export endpoint\n  Streams rows as CSV.\n')
     if (command.startsWith('diff --stat')) return answer(0, ' src/export.ts | 40 ++++\n')

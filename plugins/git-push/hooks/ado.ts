@@ -169,9 +169,11 @@ export const PULL_SHAPE = 'Answer with only this JSON object and nothing else:\n
 export const draftPrompt = (branch: string, target: string, commits: string, diffstat: string) =>
   [
     `Draft an Azure DevOps pull request merging branch "${branch}" into "${target}".`,
+    `These commits and files are everything it changes, compared with "${target}".`,
     `Its commits:\n${commits.trim() || '(none listed)'}`,
     `Files changed:\n${diffstat.trim() || '(none listed)'}`,
-    'Use those and this conversation.',
+    'Take what changed from those alone: the "Changes" list names nothing they do not show, even when this ' +
+      'conversation discusses other work. Use the conversation for why the change is needed and how it was tested.',
     PULL_RULES,
     PULL_SHAPE,
   ].join('\n\n')
