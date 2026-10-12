@@ -33,6 +33,8 @@ declare module 'claude-code' {
       readyBranch: string | null
       pull: PullRequest | null
       draft: PullRequestDraft | null
+      // The branches the draft can merge into, the one picked for it first.
+      bases: string[]
       busy: string | null
       notice: string | null
     }

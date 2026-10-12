@@ -30,7 +30,21 @@ import {
   type RawEvaluation,
   type RawPullRequest,
 } from './ado'
-import { describe, failureOf, isSame, NEW_COMMITS, POLL_MS, PUSH, PUSH_TIMEOUT_MS, REMOTE } from './git'
+import {
+  basesOf,
+  BRANCH_DISTANCES,
+  describe,
+  distancesOf,
+  failureOf,
+  FETCH,
+  FETCH_TIMEOUT_MS,
+  isSame,
+  NEW_COMMITS,
+  POLL_MS,
+  PUSH,
+  PUSH_TIMEOUT_MS,
+  REMOTE,
+} from './git'
 
 type Engine = EngineInterface
 
@@ -41,6 +55,7 @@ const isPushing = atom({ plugin: 'git-push', key: 'isPushing' } as const, false)
 const readyBranch = atom({ plugin: 'git-push', key: 'readyBranch' } as const, null)
 const pull = atom({ plugin: 'git-push', key: 'pull' } as const, null)
 const draft = atom({ plugin: 'git-push', key: 'draft' } as const, null)
+const bases = atom({ plugin: 'git-push', key: 'bases' } as const, [])
 const busy = atom({ plugin: 'git-push', key: 'busy' } as const, null)
 const notice = atom({ plugin: 'git-push', key: 'notice' } as const, null)
 
@@ -244,20 +259,48 @@ async function defaultBranchOf($: Engine, branch: Branch & { repo: AdoRepo }) {
 const readyOf = (branch: Branch | null) =>
   branch?.isPublished && branch.repo !== null ? { ...branch, repo: branch.repo } : null
 
+// The branches the pull request can merge into, the one the branch was most likely cut from first. Measured against
+// origin as it is now: offline, as it was last fetched; with a git too old to measure, only the default branch.
+async function basesFor($: Engine, branch: Branch & { repo: AdoRepo }) {
+  const fallback = await defaultBranchOf($, branch)
+  await git($, FETCH, { timeoutMs: FETCH_TIMEOUT_MS }).catch(() => undefined)
+  const found = await git($, BRANCH_DISTANCES).catch(() => null)
+
+  return found?.exitCode === 0 ? basesOf(distancesOf(found.stdout), branch.branch, fallback) : [fallback]
+}
+
+// Only the commits and files between the target and HEAD go in, so the draft describes this branch's work alone.
+async function draftInto($: Engine, branch: Branch, target: string) {
+  const commits = await git($, ['log', '--no-merges', '--format=- %s%n%w(0,2,2)%b', `${REMOTE}/${target}..HEAD`])
+  const diffstat = await git($, ['diff', '--stat', `${REMOTE}/${target}...HEAD`])
+  const prompt = draftPrompt(branch.branch, target, commits.stdout.slice(0, 8000), diffstat.stdout.slice(0, 4000))
+
+  return parseDraft(await ask($, prompt), target)
+}
+
 async function startDraft($: Engine) {
   const branch = readyOf(current)
   if (branch === null) return
   typedTitle = undefined
   await update($, draft, () => null)
+  await update($, bases, () => [])
   await $.ui.open({ id: PANE, title: 'Pull request', focus: true })
   await attempt($, 'Drafting the pull request...', async () => {
-    const target = await defaultBranchOf($, branch)
-    const range = `${REMOTE}/${target}..HEAD`
-    const commits = await git($, ['log', '--no-merges', '--format=- %s%n%w(0,2,2)%b', range])
-    const diffstat = await git($, ['diff', '--stat', `${REMOTE}/${target}...HEAD`])
-    const prompt = draftPrompt(branch.branch, target, commits.stdout.slice(0, 8000), diffstat.stdout.slice(0, 4000))
-    const drafted = parseDraft(await ask($, prompt), target)
+    const found = await basesFor($, branch)
+    await update($, bases, () => found)
+    const drafted = await draftInto($, branch, found[0] ?? '')
     await update($, draft, () => drafted)
+  })
+}
+
+// Another target changes what the pull request holds, so the draft is written again.
+async function retarget($: Engine, target: string) {
+  const [branch, drafted] = [readyOf(current), await read($, draft)]
+  if (branch === null || drafted === null || drafted.target === target || (await read($, busy)) !== null) return
+  await attempt($, `Drafting the pull request into ${target}...`, async () => {
+    const redrafted = await draftInto($, branch, target)
+    typedTitle = undefined
+    await update($, draft, () => redrafted)
   })
 }
 
@@ -304,6 +347,7 @@ async function createPull($: Engine) {
 async function discard($: Engine) {
   typedTitle = undefined
   await update($, draft, () => null)
+  await update($, bases, () => [])
   await update($, notice, () => null)
   await $.ui.close({ id: PANE })
 }
@@ -376,10 +420,11 @@ export const register: Register = on => {
       const { Text } = $.ui.resolve(e)
       return <Text dimColor>The pull request pane needs the terminal or the desktop app.</Text>
     }
-    const { Box, Button, Input, Markdown, Text } = $.ui.resolve(e)
+    const { Box, Button, Input, Markdown, Select, Text } = $.ui.resolve(e)
     const working = await read($, busy)
     const said = await read($, notice)
     const drafted = await read($, draft)
+    const targets = await read($, bases)
     const branch = current?.branch ?? ''
 
     return (
@@ -387,6 +432,15 @@ export const register: Register = on => {
         <Text bold>
           {drafted === null ? `Pull request for ${branch}` : `${branch} → ${drafted.target}`}
         </Text>
+        {drafted !== null && working === null && targets.length > 1 && (
+          <Select
+            key="target"
+            label="Into   "
+            options={targets.map(value => ({ value }))}
+            value={drafted.target}
+            onSelect={value => void retarget($, value)}
+          />
+        )}
         {drafted !== null && (
           <Input
             key="title"

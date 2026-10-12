@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { adoRepoOf, PULL_POLL_MS, summaryOf, toPullRequest } from '../hooks/ado'
+import { basesOf, distancesOf } from '../hooks/git'
 import { activePull, ADO_REMOTE, BAND, fakeGit, PANE, SESSION } from './fake'
 
 const PUSHED = { upstream: 'origin/feature/export', ahead: 0, remote: ADO_REMOTE }
@@ -73,6 +74,72 @@ test('a pushed branch offers a pull request, drafted from the session and create
   expect(ran.some(command => command.includes('pat-secret'))).toBe(false)
   await pane.unmount()
   await band.unmount()
+})
+
+test('a branch cut from dev merges into dev, drafted from its own commits, and can be pointed elsewhere', async ($, on) => {
+  const remoteBranches = ['HEAD 0 0', 'feature/export 0 0', 'dev 0 2', 'main 0 9', 'feature/import 1 2'].join('\n')
+  const { server, ran, prompts, clock } = fakeGit(on, { ...PUSHED, credential: PAT, remoteBranches }, {
+    drafts: [DRAFT, JSON.stringify({ title: 'CPC-7: Add export to main', description: 'Into main.' })],
+  })
+  await $.session.start({ ...SESSION, surface: 'terminal' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'create-pr' })
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect(ran).toContain('git fetch --prune origin')
+  expect(ran.some(command => command.endsWith('origin/dev..HEAD'))).toBe(true)
+  expect(ran).toContain('git diff --stat origin/dev...HEAD')
+  expect(prompts[0]).toContain('merging branch "feature/export" into "dev"')
+  expect((await pane.find({ type: 'Text', text: /→/ }))?.text).toBe('feature/export → dev')
+  expect((await pane.find({ key: 'target' }))?.props.options).toEqual([
+    { value: 'dev' },
+    { value: 'feature/import' },
+    { value: 'main' },
+  ])
+
+  await pane.select({ key: 'target', value: 'main' })
+  await clock.settle()
+
+  expect(ran.some(command => command.endsWith('origin/main..HEAD'))).toBe(true)
+  expect(prompts[1]).toContain('merging branch "feature/export" into "main"')
+  expect((await pane.find({ key: 'title' }))?.props.value).toBe('CPC-7: Add export to main')
+
+  await pane.press({ key: 'create' })
+  await clock.settle()
+
+  expect(server.requests.find(request => request.method === 'POST')?.body?.targetRefName).toBe('refs/heads/main')
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('a git too old to measure branches drafts into the default branch, with nothing to pick', async ($, on) => {
+  const { prompts, clock } = fakeGit(on, { ...PUSHED, credential: PAT, remoteBranches: null }, { drafts: [DRAFT] })
+  await $.session.start({ ...SESSION, surface: 'terminal' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'create-pr' })
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  expect(prompts[0]).toContain('into "main"')
+  expect(await pane.find({ key: 'target' })).toBeUndefined()
+  await pane.unmount()
+  await band.unmount()
+})
+
+test('the base is the branch missing the fewest commits of HEAD, then with the fewest of its own', () => {
+  const lines = ['HEAD 0 0', 'mine 0 0', 'main 4 3', 'dev 0 3', 'release 0 3', 'merged 2 0', 'sibling 1 3', 'old 0 12']
+  const distances = distancesOf(lines.join('\n'))
+
+  expect(distances[2]).toEqual({ branch: 'main', theirs: 4, ours: 3 })
+  // merged already holds every commit of HEAD; old is further back than all the rest.
+  expect(basesOf(distances, 'mine', 'main')).toEqual(['dev', 'release', 'sibling', 'main', 'old'])
+  expect(basesOf(distances, 'mine', 'main', 2)).toEqual(['dev', 'release', 'main'])
+  // Among equals, the default branch comes first.
+  expect(basesOf(distancesOf('main 0 2\ndev 0 2'), 'mine', 'main')).toEqual(['main', 'dev'])
+  expect(basesOf([], 'mine', 'main')).toEqual(['main'])
 })
 
 test('the line follows the pull request until it is merged', async ($, on) => {
