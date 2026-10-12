@@ -1,8 +1,8 @@
 import type { PullRequest, PullRequestDraft } from '../types'
 
-// Azure DevOps Server 2022 and later, and Azure DevOps Services, all answer 7.0.
-const API = 'api-version=7.0'
-const POLICY_API = 'api-version=7.0-preview.1'
+// Azure DevOps Server 2020 and later, and Azure DevOps Services, all answer 6.0; a newer version is refused by older servers.
+const API = 'api-version=6.0'
+const POLICY_API = 'api-version=6.0-preview.1'
 
 // How often an open pull request's status is asked again.
 export const PULL_POLL_MS = 60_000

@@ -72,7 +72,7 @@ When `origin` is an Azure DevOps repository (Azure DevOps Server, such as `https
 
 From then on the line follows the pull request, checking every minute: `PR #12 · Active · 1 of 2 approved · checks running`. Conflicts, a rejection or a failed check turn it red, changes requested yellow, and a merged pull request shows **Merged** in the merge purple. `PR #12` opens it in the browser. A pull request opened in the browser shows up too.
 
-Signing in needs no setup. The plugin asks git for the credential it uses for `origin` (`git credential fill`), then sends requests through Windows PowerShell: first as Basic sign-in (a personal access token), then as Windows sign-in with the same credential (a domain password), and with no stored credential as your Windows account. The credential stays in memory and goes to PowerShell on its standard input, never on a command line. Requests use REST API version 7.0, which Azure DevOps Server 2022 and later answer. Pull requests need Windows.
+Signing in needs no setup. The plugin asks git for the credential it uses for `origin` (`git credential fill`), then sends requests through Windows PowerShell: first as Basic sign-in (a personal access token), then as Windows sign-in with the same credential (a domain password), and with no stored credential as your Windows account. The credential stays in memory and goes to PowerShell on its standard input, never on a command line. Requests use REST API version 6.0, which Azure DevOps Server 2020 and later answer. Pull requests need Windows.
 
 When both plugins are installed, their lines stack in the band above the prompt.
 

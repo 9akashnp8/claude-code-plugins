@@ -45,7 +45,7 @@ test('a pushed branch offers a pull request, drafted from the session and create
 
   const created = server.requests.find(request => request.method === 'POST')
   expect(created?.url).toBe(
-    'https://devops.example.com/tfs/Applications/Data%20Platform/_apis/git/repositories/workplace/pullrequests?api-version=7.0',
+    'https://devops.example.com/tfs/Applications/Data%20Platform/_apis/git/repositories/workplace/pullrequests?api-version=6.0',
   )
   expect(created?.body).toEqual({
     sourceRefName: 'refs/heads/feature/export',
