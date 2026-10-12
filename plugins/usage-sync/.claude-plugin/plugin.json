@@ -1,13 +1,15 @@
 {
   "name": "usage-sync",
   "version": "0.1.0",
-  "description": "Records this device's Claude Code token usage and syncs it to a GitHub repository, so usage from every machine adds up in one place.",
-  "author": { "name": "Akash N. Rao" },
+  "description": "Syncs this machine's Claude Code token usage to a GitHub repository from session hooks, so usage from every machine adds up in one place.",
+  "author": {
+    "name": "Akash N. Rao"
+  },
   "userConfig": {
     "repo": {
       "type": "string",
       "title": "Data repository",
-      "description": "The GitHub repository the usage files go to, as owner/name (e.g. 9akashnp8/claude-usage-data). It must already have a commit on the branch below.",
+      "description": "The GitHub repository the usage files go to, as owner/name (e.g. 9akashnp8/claude-usage-data). Its branch must already have a commit.",
       "default": ""
     },
     "token": {
@@ -49,7 +51,7 @@
     "sync_interval_minutes": {
       "type": "number",
       "title": "Sync interval (minutes)",
-      "description": "How often an open session uploads this machine's usage. Sessions on one machine share the interval.",
+      "description": "A session that starts within this many minutes of the last sync skips its own. A session that ends always syncs.",
       "default": 60,
       "min": 5,
       "max": 1440

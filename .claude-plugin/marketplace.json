@@ -28,7 +28,7 @@
     {
       "name": "usage-sync",
       "source": "./plugins/usage-sync",
-      "description": "Records this device's Claude Code token usage and syncs it to a GitHub repository, so usage from every machine adds up in one place."
+      "description": "Syncs this machine's Claude Code token usage to a GitHub repository from session hooks, so usage from every machine adds up in one place."
     }
   ]
 }
