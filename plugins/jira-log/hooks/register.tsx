@@ -943,6 +943,7 @@ export const register: Register = on => {
                 placeholder="what needs doing, as a short imperative title"
                 value={drafted.summary}
                 onInput={value => void editIssue($, { summary: cappedSummary(value) })}
+                onSubmit={value => void editIssue($, { summary: cappedSummary(value) })}
               />
               <Input
                 key="goal"
@@ -950,6 +951,7 @@ export const register: Register = on => {
                 placeholder="the outcome wanted and why"
                 value={drafted.goal}
                 onInput={value => void editIssue($, { goal: value })}
+                onSubmit={value => void editIssue($, { goal: value })}
               />
               {ISSUE_SECTIONS.map(([field, title]) => (
                 <Box key={field} flexDirection="column">
