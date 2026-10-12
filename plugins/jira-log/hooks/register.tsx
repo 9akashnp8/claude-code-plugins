@@ -7,6 +7,7 @@ import {
   addOnce,
   cappedSummary,
   COMMIT,
+  currentSprint,
   dayOf,
   earlierDaysIn,
   emptyIssue,
@@ -15,7 +16,6 @@ import {
   isIssueReady,
   isReviewTool,
   isSameStatus,
-  ISSUE_SECTIONS,
   ISSUE_SHAPE,
   newIssuePrompt,
   OPEN,
@@ -30,24 +30,26 @@ import {
   reviewRequestOf,
   reviewUrlIn,
   SEAL,
+  sprintOf,
+  sprintOptions,
+  sprintValue,
   TEST_RUN,
   toDocument,
   toIssue,
   toIssueDocument,
-  toIssueMarkdown,
   toMarkdown,
+  toSprints,
   toTransition,
   UPDATE_AND_MOVE_SHAPE,
   UPDATE_RULES,
   UPDATE_SHAPE,
-  withListItem,
-  withoutListItem,
   type CoveredDay,
   type DailyComment,
   type DayActivity,
   type JiraConfig,
   type RawComment,
   type RawIssue,
+  type RawSprint,
   type RawTransition,
   type UnpostedDay,
 } from './format'
@@ -69,6 +71,7 @@ const draft = atom({ plugin: 'jira-log', key: 'draft' } as const, null)
 const suggestion = atom({ plugin: 'jira-log', key: 'suggestion' } as const, null)
 const newIssue = atom({ plugin: 'jira-log', key: 'newIssue' } as const, null)
 const issueTypes = atom({ plugin: 'jira-log', key: 'issueTypes' } as const, [])
+const sprints = atom({ plugin: 'jira-log', key: 'sprints' } as const, [])
 const transitions = atom({ plugin: 'jira-log', key: 'transitions' } as const, [])
 const busy = atom({ plugin: 'jira-log', key: 'busy' } as const, null)
 const notice = atom({ plugin: 'jira-log', key: 'notice' } as const, null)
@@ -162,6 +165,25 @@ async function creatableTypes($: Engine, config: JiraConfig, project: string) {
   const found = await jira<{ issueTypes?: RawIssueType[]; values?: RawIssueType[] }>($, config, 'GET', path)
 
   return (found.issueTypes ?? found.values ?? []).filter(type => !type.subtask).map(type => type.name)
+}
+
+// Sprints live on the project's scrum boards, in Jira Software's own API; kanban boards have none.
+async function openSprints($: Engine, config: JiraConfig, project: string) {
+  const path = `/rest/agile/1.0/board?projectKeyOrId=${encodeURIComponent(project)}&type=scrum`
+  const boards = (await jira<{ values: { id: number }[] }>($, config, 'GET', path)).values
+  const lists = await Promise.all(
+    boards.map(async board => {
+      const sprintsPath = `/rest/agile/1.0/board/${board.id}/sprint?state=active,future`
+
+      return (await jira<{ values: RawSprint[] }>($, config, 'GET', sprintsPath)).values
+    }),
+  )
+
+  return toSprints(lists)
+}
+
+async function addToSprint($: Engine, config: JiraConfig, sprint: number, key: string) {
+  await jira($, config, 'POST', `/rest/agile/1.0/sprint/${sprint}/issue`, { issues: [key] })
 }
 
 // One comment per issue per day: today's earlier comment is replaced, unless
@@ -607,10 +629,19 @@ async function startCreate($: Engine, focus = '', isManual = false) {
   await update($, newIssue, () => null)
   await openPane($, 'create')
   await attempt($, isManual ? `Opening a new ${project} issue...` : `Drafting a new ${project} issue...`, async () => {
-    const types = await creatableTypes($, config, project)
+    // Without Jira Software, or a scrum board, there are no sprints and the issue goes to the backlog.
+    const [types, open] = await Promise.all([
+      creatableTypes($, config, project),
+      openSprints($, config, project).catch(error => {
+        $.ui.log(`jira-log: could not load the sprints of ${project}: ${message(error)}`, { to: 'debug' })
+        return []
+      }),
+    ])
     await update($, issueTypes, () => types)
+    await update($, sprints, () => open)
     const fallback = types.find(type => isSameStatus(type, 'Task')) ?? types[0] ?? 'Task'
-    const started = isManual ? emptyIssue(fallback) : parseNewIssue(await ask($, newIssuePrompt(focus.trim())), fallback)
+    const blank = emptyIssue(fallback, currentSprint(open))
+    const started = isManual ? blank : { ...blank, ...parseNewIssue(await ask($, newIssuePrompt(focus.trim()))) }
     await update($, newIssue, () => started)
   })
 
@@ -622,21 +653,18 @@ async function startCreate($: Engine, focus = '', isManual = false) {
 const editIssue = ($: Engine, change: Partial<JiraNewIssue>) =>
   update($, newIssue, one => (one === null ? one : { ...one, ...change }))
 
-const editList = ($: Engine, field: 'scope' | 'acceptance' | 'notes', change: (list: string[]) => string[]) =>
-  update($, newIssue, one => (one === null ? one : { ...one, [field]: change(one[field]) }))
-
 async function reviseIssue($: Engine, instruction: string) {
   const current = await read($, newIssue)
   if (current === null || instruction.trim() === '') return
   await attempt($, 'Revising...', async () => {
-    const { issueType: _, ...fields } = current
+    const { summary, description } = current
     const prompt =
-      `This is the current draft of a new Jira ticket:\n${JSON.stringify(fields)}\n\n` +
+      `This is the current draft of a new Jira ticket:\n${JSON.stringify({ summary, description })}\n\n` +
       `Revise it as follows: ${instruction.trim()}\n\n` +
-      'Keep it a description of work to be done, under 150 words.\n\n' +
+      'Keep it a description of work to be done, under 120 words.\n\n' +
       ISSUE_SHAPE
-    const revised = parseNewIssue(await ask($, prompt), current.issueType)
-    await update($, newIssue, () => revised)
+    const revised = parseNewIssue(await ask($, prompt))
+    await update($, newIssue, one => (one === null ? one : { ...one, ...revised }))
   })
 }
 
@@ -653,6 +681,12 @@ async function createIssue($: Engine) {
         description: toIssueDocument(current),
       },
     })
+    if (current.sprint !== null) {
+      const name = (await read($, sprints)).find(one => one.id === current.sprint)?.name ?? 'the sprint'
+      await addToSprint($, config, current.sprint, created.key).catch(error =>
+        $.ui.toast(`Created ${created.key} but could not add it to ${name}: ${message(error)}`),
+      )
+    }
     const { accountId } = await whoAmI($, config)
     const assignee = `/rest/api/3/issue/${encodeURIComponent(created.key)}/assignee`
     await jira($, config, 'PUT', assignee, { accountId }).catch(error =>
@@ -929,59 +963,47 @@ export const register: Register = on => {
     if (current === 'create') {
       const drafted = await read($, newIssue)
       const types = await read($, issueTypes)
+      const open = await read($, sprints)
 
       return (
         <Box flexDirection="column" gap={1}>
           <Text bold>New issue</Text>
           {drafted !== null && working !== null && <Text bold>{drafted.summary}</Text>}
-          {drafted !== null && working !== null && <Markdown text={toIssueMarkdown(drafted)} />}
+          {drafted !== null && working !== null && drafted.description !== '' && <Text>{drafted.description}</Text>}
           {drafted !== null && working === null && (
             <Box flexDirection="column" gap={1}>
               <Input
                 key="summary"
-                label="Summary "
+                label="Title       "
                 placeholder="what needs doing, as a short imperative title"
                 value={drafted.summary}
                 onInput={value => void editIssue($, { summary: cappedSummary(value) })}
                 onSubmit={value => void editIssue($, { summary: cappedSummary(value) })}
               />
               <Input
-                key="goal"
-                label="Goal    "
-                placeholder="the outcome wanted and why"
-                value={drafted.goal}
-                onInput={value => void editIssue($, { goal: value })}
-                onSubmit={value => void editIssue($, { goal: value })}
+                key="description"
+                label="Description "
+                placeholder="the outcome wanted, why, and how to tell it is done"
+                value={drafted.description}
+                onInput={value => void editIssue($, { description: value })}
+                onSubmit={value => void editIssue($, { description: value })}
               />
-              {ISSUE_SECTIONS.map(([field, title]) => (
-                <Box key={field} flexDirection="column">
-                  <Text bold>{title}</Text>
-                  {drafted[field].map((item, index) => (
-                    <Box key={`${field}-${index}`} flexDirection="row" gap={1}>
-                      <Text>- {item}</Text>
-                      <Button
-                        key={`remove-${field}-${index}`}
-                        label="Remove"
-                        onPress={() => void editList($, field, list => withoutListItem(list, index))}
-                      />
-                    </Box>
-                  ))}
-                  <Input
-                    key={`add-${field}-${drafted[field].length}`}
-                    label="Add "
-                    placeholder={`a ${title.toLowerCase()} item, then Enter`}
-                    submitLabel="add"
-                    onSubmit={value => void editList($, field, list => withListItem(list, value))}
-                  />
-                </Box>
-              ))}
               {types.length > 0 && (
                 <Select
                   key="type"
-                  label="Type "
+                  label="Type   "
                   value={drafted.issueType}
                   options={types.map(type => ({ value: type, label: type }))}
-                  onSelect={type => void update($, newIssue, one => (one === null ? one : { ...one, issueType: type }))}
+                  onSelect={type => void editIssue($, { issueType: type })}
+                />
+              )}
+              {open.length > 0 && (
+                <Select
+                  key="sprint"
+                  label="Sprint "
+                  value={sprintValue(drafted.sprint)}
+                  options={sprintOptions(open)}
+                  onSelect={value => void editIssue($, { sprint: sprintOf(value) })}
                 />
               )}
               {isIssueReady(drafted) && (

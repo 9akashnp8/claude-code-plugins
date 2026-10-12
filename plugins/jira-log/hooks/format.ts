@@ -1,4 +1,4 @@
-import type { JiraIssue, JiraNewIssue, JiraProgress, JiraSuggestion, JiraTransition, JiraUpdate } from '../types'
+import type { JiraIssue, JiraNewIssue, JiraProgress, JiraSprint, JiraSuggestion, JiraTransition, JiraUpdate } from '../types'
 
 export type JiraConfig = { site: string; email: string; tokenBlob: string; project?: string }
 
@@ -31,6 +31,8 @@ export type RawIssue = {
 export type RawComment = { id: string; updated: string }
 
 export type RawTransition = { id: string; name: string; to: { name: string } }
+
+export type RawSprint = { id: number; name: string; state: string }
 
 export const IN_PROGRESS = 'In Progress'
 
@@ -119,8 +121,7 @@ export const UPDATE_AND_MOVE_SHAPE =
   'Answer with only this JSON object and nothing else:\n{"notes": [], "move": {"to": "", "reason": ""}}'
 
 export const ISSUE_SHAPE =
-  'Answer with only this JSON object and nothing else:\n' +
-  '{"summary": "", "goal": "", "scope": [], "acceptance": [], "notes": []}'
+  'Answer with only this JSON object and nothing else:\n{"summary": "", "description": ""}'
 
 export function newIssuePrompt(focus: string) {
   const subject = focus
@@ -134,13 +135,11 @@ export function newIssuePrompt(focus: string) {
     [
       'Rules:',
       '- Write it as work ahead, for a teammate who has not seen the conversation. Never narrate what was ' +
-        'discussed, tried or found, or what exists so far; at most one clause of background, inside the goal.',
+        'discussed, tried or found, or what exists so far.',
       '- summary: an imperative title under 80 characters.',
-      '- goal: one or two sentences: the outcome wanted and why.',
-      '- scope: 2 to 6 deliverables, each one short line starting with a verb.',
-      '- acceptance: 2 to 5 checkable outcomes that say when the ticket is done.',
-      '- notes: only open questions or constraints someone must know before starting; usually empty.',
-      '- Under 150 words in all. No code, file paths, diffs, secrets or internal hostnames.',
+      '- description: 2 to 4 plain sentences: the outcome wanted, why, and how to tell it is done. No ' +
+        'headings or lists.',
+      '- Under 120 words in all. No code, file paths, diffs, secrets or internal hostnames.',
     ].join('\n'),
     ISSUE_SHAPE,
   ].join('\n\n')
@@ -241,19 +240,13 @@ const listOf = (value: unknown) =>
     ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '').map(item => item.trim())
     : []
 
-export function parseNewIssue(reply: string, issueType: string): JiraNewIssue {
-  const parsed = objectIn(reply) as Partial<Record<keyof JiraNewIssue, unknown>>
-  const summary = typeof parsed.summary === 'string' ? parsed.summary.trim().slice(0, 255) : ''
+// The ticket's text only: its type and sprint are picked in the form, not by the model.
+export function parseNewIssue(reply: string): Pick<JiraNewIssue, 'summary' | 'description'> {
+  const parsed = objectIn(reply) as { summary?: unknown; description?: unknown }
+  const summary = typeof parsed.summary === 'string' ? cappedSummary(parsed.summary.trim()) : ''
   if (summary === '') throw new Error('the model drafted no summary')
 
-  return {
-    summary,
-    goal: typeof parsed.goal === 'string' ? parsed.goal.trim() : '',
-    scope: listOf(parsed.scope),
-    acceptance: listOf(parsed.acceptance),
-    notes: listOf(parsed.notes),
-    issueType,
-  }
+  return { summary, description: typeof parsed.description === 'string' ? parsed.description.trim() : '' }
 }
 
 // Only a move the workflow allows from here is suggested; anything else the model names is dropped.
@@ -277,43 +270,45 @@ export function parseUpdate(reply: string): JiraUpdate {
 export const toMarkdown = (update: JiraUpdate) =>
   update.notes.map(note => `- ${note}`).join('\n') || '_Nothing to report._'
 
-export const ISSUE_SECTIONS = [
-  ['scope', 'Scope'],
-  ['acceptance', 'Acceptance criteria'],
-  ['notes', 'Notes'],
-] as const
-
 const SUMMARY_LIMIT = 255
-const LIST_LIMIT = 20
 
 // A ticket the person writes themselves starts blank; only the summary is required.
-export const emptyIssue = (issueType: string): JiraNewIssue => ({
+export const emptyIssue = (issueType: string, sprint: number | null = null): JiraNewIssue => ({
   summary: '',
-  goal: '',
-  scope: [],
-  acceptance: [],
-  notes: [],
+  description: '',
   issueType,
+  sprint,
 })
 
 export const isIssueReady = (issue: JiraNewIssue) => issue.summary.trim() !== ''
 
 export const cappedSummary = (summary: string) => summary.slice(0, SUMMARY_LIMIT)
 
-export const withListItem = (list: string[], item: string) =>
-  item.trim() === '' ? list : addOnce(list, item.trim(), LIST_LIMIT)
+// The open sprints of the project's boards, each once: the active ones first, then the future ones.
+export function toSprints(lists: readonly (readonly RawSprint[])[]): JiraSprint[] {
+  const open = new Map<number, JiraSprint>()
+  for (const { id, name, state } of lists.flat()) {
+    if (!open.has(id) && (state === 'active' || state === 'future')) open.set(id, { id, name, state })
+  }
+  const sprints = [...open.values()]
 
-export const withoutListItem = (list: string[], index: number) => list.filter((_, at) => at !== index)
+  return [...sprints.filter(one => one.state === 'active'), ...sprints.filter(one => one.state === 'future')]
+}
 
-export const toIssueMarkdown = (issue: JiraNewIssue) =>
-  [
-    issue.goal,
-    ...ISSUE_SECTIONS.filter(([field]) => issue[field].length > 0).map(
-      ([field, title]) => `#### ${title}\n${issue[field].map(item => `- ${item}`).join('\n')}`,
-    ),
-  ]
-    .filter(Boolean)
-    .join('\n\n')
+// A new issue goes into the current sprint unless the person picks another one, or the backlog.
+export const currentSprint = (sprints: readonly JiraSprint[]) =>
+  sprints.find(one => one.state === 'active')?.id ?? null
+
+const BACKLOG = 'backlog'
+
+export const sprintOptions = (sprints: readonly JiraSprint[]) => [
+  ...sprints.map(one => ({ value: String(one.id), label: one.state === 'active' ? `${one.name} (current)` : one.name })),
+  { value: BACKLOG, label: 'Backlog' },
+]
+
+export const sprintValue = (sprint: number | null) => (sprint === null ? BACKLOG : String(sprint))
+
+export const sprintOf = (value: string) => (value === BACKLOG ? null : Number(value))
 
 const text = (value: string, isStrong = false) =>
   isStrong ? { type: 'text', text: value, marks: [{ type: 'strong' }] } : { type: 'text', text: value }
@@ -322,11 +317,6 @@ const bulletList = (items: readonly string[]) => ({
   type: 'bulletList',
   content: items.map(item => ({ type: 'listItem', content: [{ type: 'paragraph', content: [text(item)] }] })),
 })
-
-const headedList = (title: string, items: readonly string[]) => [
-  { type: 'heading', attrs: { level: 4 }, content: [text(title)] },
-  bulletList(items),
-]
 
 // Comment and description bodies in the v3 API are Atlassian Document Format, not markdown.
 export function toDocument(day: string, update: JiraUpdate) {
@@ -339,11 +329,9 @@ export function toDocument(day: string, update: JiraUpdate) {
   }
 }
 
+// Each line of the description is a paragraph of its own.
 export function toIssueDocument(issue: JiraNewIssue) {
-  const sections = ISSUE_SECTIONS.filter(([field]) => issue[field].length > 0).flatMap(([field, title]) =>
-    headedList(title, issue[field]),
-  )
-  const goal = issue.goal === '' ? [] : [{ type: 'paragraph', content: [text(issue.goal)] }]
+  const lines = issue.description.split('\n').map(line => line.trim()).filter(Boolean)
 
-  return { type: 'doc', version: 1, content: [...goal, ...sections] }
+  return { type: 'doc', version: 1, content: lines.map(line => ({ type: 'paragraph', content: [text(line)] })) }
 }
