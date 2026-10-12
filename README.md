@@ -1,6 +1,6 @@
 # claude-code-auto-jira-log
 
-A Claude Code plugin that keeps Jira Cloud up to date with the work you do in Claude Code, a second one, [git-push](#git-push), that pushes your commits from a button, and a third, [worktree-hooks](#worktree-hooks), that starts each worktree from the latest remote branch.
+A Claude Code plugin that keeps Jira Cloud up to date with the work you do in Claude Code, a second one, [git-push](#git-push), that pushes your commits from a button, and a third, [worktree-hooks](#worktree-hooks), that starts each worktree from the latest remote branch, and [usage-sync](#usage-sync), that adds up your Claude Code usage across machines.
 
 - **Link** a worktree to a Jira issue: pick one of your open issues, type a key, or create a new issue drafted from the conversation.
 - **Record** the day's work on that issue as you go: files edited, commits, test runs, pull requests, and Artifacts published.
@@ -154,6 +154,73 @@ Don't enable it alongside `worktree-hooks`: both would answer `WorktreeCreate`.
 
 `FileChanged` only fires for files named in its matcher, so with none it may never fire. Every hook starts Git Bash on Windows, which adds a little time to each tool call: disable the plugin when you are done.
 
+## usage-sync
+
+Another plugin in this marketplace: add up your Claude Code usage across machines. Claude Code only reports usage for the machine it runs on, and an individual plan has no API to ask. This plugin records each machine's usage as it happens and commits it to a GitHub repository of yours, one file per machine, for a dashboard to merge.
+
+```
+/plugin install usage-sync@auto-jira-log
+```
+
+### Set up
+
+1. Create the data repository on GitHub, for example `claude-usage-data`, with a README so its branch has a commit. Make it public if a static site reads it without a token.
+2. Create a fine-grained personal access token at github.com > Settings > Developer settings, with access to that repository only and **Contents: Read and write**.
+3. Fill in the plugin's options when you install it, or later in `/config`:
+
+| Option | What it is |
+| --- | --- |
+| Data repository | `owner/name`, or the repository's URL |
+| GitHub token | The token from step 2, kept in the system's credential store |
+| Branch | `main` unless you use another |
+| Folder | Where the device files go, `devices` by default |
+| Device name | This machine's file name, `<device>.json`; empty uses the host name |
+| Device label | The name a dashboard shows, such as `Work laptop` |
+| Time zone | The IANA zone days and hours are counted in, such as `Asia/Kolkata`. Set the same one on every machine; empty uses this machine's |
+| Sync interval | Minutes between uploads, 60 by default |
+
+Install it on every machine you use Claude Code on, with a different device name on each.
+
+### Use
+
+| Command | What it does |
+| --- | --- |
+| `/usage-sync` | Shows this device, what it has recorded, where it uploads and how the last sync went |
+| `/usage-sync now` | Uploads now |
+| `/usage-sync import` | Reads the transcripts Claude Code still keeps for usage from before the plugin was installed, then uploads |
+
+Nothing else is needed. Each model request, the main conversation's and every subagent's, adds its token counts (input, output, cache read, cache write) to a file for that session under `~/.claude/usage-sync/sessions/`. Ten seconds after a session starts, and then once per interval while it is open, the plugin reads the device's file from the repository, merges in what it recorded and commits the result. Sessions open at the same time on one machine share the interval. When nothing changed, nothing is committed. A session too short to reach its first sync is uploaded by the next session.
+
+The upload is the device's file alone, `devices/<device>.json`:
+
+```json
+{
+  "device": "macbook",
+  "label": "MacBook Pro",
+  "timeZone": "Asia/Kolkata",
+  "updatedAt": "2026-10-12T09:30:00.000Z",
+  "days": {
+    "2026-10-12": {
+      "sessions": 3,
+      "messages": 412,
+      "hours": [0, 0, 0, 0, 0, 0, 0, 0, 0, 37, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "models": {
+        "claude-opus-5-5": { "input": 180, "output": 91662, "cacheRead": 19465751, "cacheWrite": 518138, "requests": 90 }
+      }
+    }
+  }
+}
+```
+
+`messages` counts prompts, responses and tool results, as the transcript does, and `hours` counts responses per hour of the day. No prompt, file path, project name or session id leaves the machine.
+
+Things to know:
+
+- For each day, the fuller of the repository's copy and the machine's wins, so a reinstall or a new machine under the same device name never shrinks the record.
+- Only sessions with the plugin enabled are recorded. Sessions on claude.ai/code run in containers the plugin is not in.
+- `/usage-sync import` skips transcripts of 4 MB or more, which plugins cannot read, and says how many it skipped. Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default), so import soon after installing.
+- A failed sync shows one toast per session; `/usage-sync` shows the reason, and `claude --debug` logs each attempt.
+
 ## Develop
 
 ```
@@ -162,4 +229,4 @@ claude plugin test plugins/jira-log
 claude --plugin-dir plugins/jira-log
 ```
 
-The same commands work for `plugins/git-push`, `plugins/worktree-hooks` and `plugins/hook-logger`.
+The same commands work for `plugins/git-push`, `plugins/worktree-hooks`, `plugins/hook-logger` and `plugins/usage-sync`.
