@@ -1,6 +1,6 @@
 {
   "name": "jira-log",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Links a worktree to a Jira Cloud issue, records the work done on it, and posts a reviewed daily update comment.",
   "author": { "name": "Akash N. Rao" },
   "types": "./types/index.d.ts"

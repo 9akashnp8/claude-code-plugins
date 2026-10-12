@@ -53,10 +53,12 @@ import {
   type RawTransition,
   type UnpostedDay,
 } from './format'
+import type { DescriptionProps } from './description'
 
 type Engine = EngineInterface
 
 const PANE = 'jira'
+const DESCRIPTION_PLACEHOLDER = 'the outcome wanted, why, and how to tell it is done'
 const USAGE =
   'Usage: /jira [setup | link [KEY] | new [--manual | what the ticket is for] | update | status | unlink]'
 
@@ -860,6 +862,15 @@ export const register: Register = on => {
     )
   })
 
+  // The description area posts its whole text on each change.
+  on('ui.message', async ($, e, next) => {
+    const { description } = (e.data ?? {}) as { description?: unknown }
+    if (e.requestId !== PANE || e.element !== 'description' || typeof description !== 'string') return next(e)
+    await editIssue($, { description })
+
+    return {}
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     if (e.surface === 'mobile') {
       const { Text } = $.ui.resolve(e)
@@ -867,6 +878,8 @@ export const register: Register = on => {
       return <Text dimColor>The Jira pane needs the terminal or the desktop app.</Text>
     }
     const { Box, Button, Input, Markdown, Select, Text } = $.ui.resolve(e)
+    // VS Code draws no Client, so there the description is a one-line field.
+    const { Client } = e.surface === 'vscode' ? { Client: undefined } : $.ui.resolve(e)
     const working = await read($, busy)
     const said = await read($, notice)
     const footer = [
@@ -980,14 +993,29 @@ export const register: Register = on => {
                 onInput={value => void editIssue($, { summary: cappedSummary(value) })}
                 onSubmit={value => void editIssue($, { summary: cappedSummary(value) })}
               />
-              <Input
-                key="description"
-                label="Description "
-                placeholder="the outcome wanted, why, and how to tell it is done"
-                value={drafted.description}
-                onInput={value => void editIssue($, { description: value })}
-                onSubmit={value => void editIssue($, { description: value })}
-              />
+              {Client === undefined ? (
+                <Input
+                  key="description"
+                  label="Description "
+                  placeholder={DESCRIPTION_PLACEHOLDER}
+                  value={drafted.description}
+                  onInput={value => void editIssue($, { description: value })}
+                  onSubmit={value => void editIssue($, { description: value })}
+                />
+              ) : (
+                <Box flexDirection="column">
+                  <Box flexDirection="row" gap={1}>
+                    <Text>Description</Text>
+                    <Text dimColor>click to write · Enter adds a line · Esc leaves the box</Text>
+                  </Box>
+                  <Client
+                    key="description"
+                    module="./description.tsx"
+                    width="100%"
+                    props={{ text: drafted.description, placeholder: DESCRIPTION_PLACEHOLDER } satisfies DescriptionProps}
+                  />
+                </Box>
+              )}
               {types.length > 0 && (
                 <Select
                   key="type"
