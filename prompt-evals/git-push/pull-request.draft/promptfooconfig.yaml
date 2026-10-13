@@ -1,0 +1,41 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+# git-push: the pull request draft (draftPrompt in plugins/git-push/hooks/prompts.ts).
+# Run it with `npm run eval -- pull-request.draft`; see prompt-evals/README.md.
+description: git-push / pull-request.draft
+
+prompts:
+  - id: file://prompts.mjs:current
+    label: current
+  - id: file://prompts.mjs:baseline
+    label: baseline
+
+providers:
+  - id: file://../../lib/provider.mjs
+    label: opus-5.5
+    config:
+      model: claude-opus-5-5
+      effort: xhigh
+
+defaultTest:
+  options:
+    # The llm-rubric judge.
+    provider:
+      id: file://../../lib/provider.mjs
+      config:
+        model: claude-opus-5-5
+        effort: medium
+  assert:
+    - type: javascript
+      value: file://checks.mjs:draft
+    # The judge sees only the reply and this text, so what it needs from the case goes in through {{vars}}.
+    # What only the conversation shows (which tests ran) goes in each case's own rubric.
+    - type: llm-rubric
+      metric: changes-match-the-branch
+      value: |-
+        The output is a JSON pull request draft for a branch whose commits are:
+        {{commits}}
+        and whose changed files are:
+        {{diffstat}}
+        Pass only if the draft's "Changes" list describes nothing those commits and files do not show.
+
+tests: file://cases/*.yaml

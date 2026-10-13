@@ -1,0 +1,37 @@
+{
+  "source": "written by hand",
+  "turns": [
+    {
+      "role": "user",
+      "text": "Add a CSV export button to the monthly report page. It should download what the table shows."
+    },
+    {
+      "role": "assistant",
+      "text": "Added an export endpoint that reuses the report query, and an Export CSV button on the page.",
+      "toolUses": [
+        {
+          "name": "Write",
+          "input": "src/reports/export.ts"
+        },
+        {
+          "name": "Edit",
+          "input": "src/web/ReportPage.tsx"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "text": "Looks fine, no time for tests today. Commit and I'll raise the PR."
+    },
+    {
+      "role": "assistant",
+      "text": "Committed.",
+      "toolUses": [
+        {
+          "name": "Bash",
+          "input": "git commit -m \"Add CSV export to the monthly report\""
+        }
+      ]
+    }
+  ]
+}

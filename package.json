@@ -1,0 +1,16 @@
+{
+  "name": "auto-jira-log-dev",
+  "private": true,
+  "description": "Development tooling only; nothing here is installed with the plugins.",
+  "type": "module",
+  "engines": { "node": ">=22.22.0" },
+  "scripts": {
+    "eval": "node prompt-evals/lib/run.mjs",
+    "eval:view": "promptfoo view",
+    "eval:case": "node prompt-evals/lib/from-transcript.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.128.0",
+    "promptfoo": "0.123.1"
+  }
+}

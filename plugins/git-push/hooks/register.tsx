@@ -7,19 +7,16 @@ import {
   branchOfRef,
   createPullUrl,
   credentialOf,
-  draftPrompt,
   evaluationsUrl,
   findPullUrl,
   isRefused,
   jsonOf,
-  parseDraft,
   POWERSHELL,
   PULL_POLL_MS,
   pullUrl,
   repositoryUrl,
   requestsInput,
   responsesOf,
-  revisePrompt,
   summaryOf,
   toPullRequest,
   type AdoRepo,
@@ -45,6 +42,7 @@ import {
   PUSH_TIMEOUT_MS,
   REMOTE,
 } from './git'
+import { draftPrompt, parseDraft, revisePrompt } from './prompts'
 
 type Engine = EngineInterface
 
@@ -273,7 +271,7 @@ async function basesFor($: Engine, branch: Branch & { repo: AdoRepo }) {
 async function draftInto($: Engine, branch: Branch, target: string) {
   const commits = await git($, ['log', '--no-merges', '--format=- %s%n%w(0,2,2)%b', `${REMOTE}/${target}..HEAD`])
   const diffstat = await git($, ['diff', '--stat', `${REMOTE}/${target}...HEAD`])
-  const prompt = draftPrompt(branch.branch, target, commits.stdout.slice(0, 8000), diffstat.stdout.slice(0, 4000))
+  const prompt = draftPrompt({ branch: branch.branch, target, commits: commits.stdout, diffstat: diffstat.stdout })
 
   return parseDraft(await ask($, prompt), target)
 }
@@ -308,7 +306,7 @@ async function revise($: Engine, instruction: string) {
   const drafted = await read($, draft)
   if (drafted === null || instruction.trim() === '') return
   await attempt($, 'Revising...', async () => {
-    const prompt = revisePrompt({ ...drafted, title: typedTitle ?? drafted.title }, instruction)
+    const prompt = revisePrompt({ current: { ...drafted, title: typedTitle ?? drafted.title }, instruction })
     const revised = parseDraft(await ask($, prompt), drafted.target)
     typedTitle = undefined
     await update($, draft, () => revised)

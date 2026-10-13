@@ -1,0 +1,54 @@
+{
+  "source": "written by hand",
+  "turns": [
+    {
+      "role": "user",
+      "text": "The date-range test fails every month end. Can you find out why?"
+    },
+    {
+      "role": "assistant",
+      "text": "The test builds \"one month ago\" with setMonth, which overflows on the 31st (March 31 minus a month becomes March 3). I changed the helper to clamp to the last day of the month and pinned the clock in the test.",
+      "toolUses": [
+        {
+          "name": "Read",
+          "input": "src/util/dates.ts"
+        },
+        {
+          "name": "Edit",
+          "input": "src/util/dates.ts"
+        },
+        {
+          "name": "Edit",
+          "input": "src/util/dates.test.ts"
+        },
+        {
+          "name": "Bash",
+          "input": "npx vitest run src/util/dates.test.ts",
+          "result": "✓ src/util/dates.test.ts (12 tests)"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "text": "Great, commit that. Then let's plan the CSV export for the report page: I want a button, ISO dates, and two decimals for amounts."
+    },
+    {
+      "role": "assistant",
+      "text": "Committed the date fix. For the export, I'd add an endpoint reusing the report query plus a button on the page; I've sketched it in a scratch file but not committed anything.",
+      "toolUses": [
+        {
+          "name": "Bash",
+          "input": "git commit -m \"Clamp month arithmetic to the end of the month\""
+        },
+        {
+          "name": "Write",
+          "input": "scratch/export-plan.md"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "text": "Keep the export for tomorrow. Let's get the fix reviewed first."
+    }
+  ]
+}
