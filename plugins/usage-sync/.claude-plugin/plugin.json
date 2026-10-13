@@ -1,6 +1,6 @@
 {
   "name": "usage-sync",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Syncs this machine's Claude Code token usage to a GitHub repository from session hooks, so usage from every machine adds up in one place.",
   "author": {
     "name": "Akash N. Rao"

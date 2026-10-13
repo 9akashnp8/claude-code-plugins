@@ -18,12 +18,28 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
-import { compact, describeError, mergeDays, newScan, reasonOf, repoOf, sameDays, scanLine, slugOf, toDeviceJson, totalsOf } from './lib.mjs'
+import {
+  compact,
+  describeError,
+  FORMAT_VERSION,
+  mergeDays,
+  newScan,
+  placeSessions,
+  reasonOf,
+  repoOf,
+  sameDays,
+  scanLine,
+  slugOf,
+  toDeviceJson,
+  totalsOf,
+} from './lib.mjs'
 
 const API = process.env.USAGE_SYNC_API ?? 'https://api.github.com'
 const LOCK_STALE_MS = 10 * 60 * 1000
 const LOG_KEEP_LINES = 500
 const STDIN_WAIT_MS = 300
+// A guard against loops, not a limit: a workflow's subagents sit five folders below projects/.
+const MAX_DEPTH = 10
 
 const option = (key) => (process.env[`CLAUDE_PLUGIN_OPTION_${key}`] ?? process.env[`USAGE_SYNC_${key}`] ?? '').trim()
 
@@ -76,7 +92,7 @@ async function settingsOf(state) {
 }
 
 async function listTranscripts(folder, depth = 0) {
-  if (depth > 4) return []
+  if (depth > MAX_DEPTH) return []
   let entries
   try {
     entries = await readdir(folder, { withFileTypes: true })
@@ -110,15 +126,15 @@ async function scanFile(scan, path, timeZone, onlyDays) {
 // its last count, including days whose transcripts Claude Code has since deleted.
 async function scanTranscripts(timeZone) {
   let saved = await readJson(paths.scan, undefined)
-  // Counted in another zone: every day would move, so start over.
-  if (saved?.timeZone !== timeZone) saved = { timeZone, files: {}, days: {} }
+  // Counted in another zone or under other counting rules: every day would move, so start over.
+  if (saved?.timeZone !== timeZone || saved.version !== FORMAT_VERSION) saved = { version: FORMAT_VERSION, timeZone, files: {}, days: {}, sessions: {} }
   const files = await listTranscripts(join(claudeDir, 'projects'))
   const changed = files.filter((f) => {
     const known = saved.files[f.path]
     return known === undefined || known.size !== f.size || known.mtimeMs !== f.mtimeMs
   })
 
-  const scan = newScan()
+  const scan = newScan(saved.sessions)
   const recount = new Set()
   const fileDays = {}
   for (const file of changed) {
@@ -134,9 +150,10 @@ async function scanTranscripts(timeZone) {
 
   const days = { ...saved.days }
   for (const day of recount) days[day] = scan.days[day]
+  placeSessions(days, scan.sessionStarts, timeZone)
   const kept = {}
   for (const file of files) kept[file.path] = { size: file.size, mtimeMs: file.mtimeMs, days: fileDays[file.path] ?? saved.files[file.path].days }
-  await writeFile(paths.scan, JSON.stringify({ timeZone, files: kept, days }))
+  await writeFile(paths.scan, JSON.stringify({ version: FORMAT_VERSION, timeZone, files: kept, days, sessions: Object.fromEntries(scan.sessionStarts) }))
   return { days, read: changed.length, total: files.length }
 }
 
@@ -180,10 +197,13 @@ async function upload(settings, local) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const remote = await readRemote(settings, path)
     await log(`upload attempt ${attempt + 1}: remote file ${remote.file === undefined ? 'does not exist yet' : `found (${remote.sha})`}`)
-    const days = mergeDays(remote.file?.days ?? {}, local)
-    if (remote.file !== undefined && sameDays(days, remote.file.days)) return { days, isChanged: false }
+    // A copy counted under other rules cannot be compared day by day: this machine's days replace it.
+    const isCurrent = remote.file?.version === FORMAT_VERSION
+    const days = mergeDays(remote.file?.days ?? {}, local, { preferLocal: !isCurrent })
+    if (remote.file !== undefined && isCurrent && sameDays(days, remote.file.days)) return { days, isChanged: false }
 
     const file = {
+      version: FORMAT_VERSION,
       device: settings.device,
       label: settings.label || remote.file?.label || settings.device,
       timeZone: settings.timeZone,

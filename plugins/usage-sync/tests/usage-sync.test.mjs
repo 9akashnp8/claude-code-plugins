@@ -10,7 +10,7 @@ import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-import { describeError, localDayAndHour, mergeDays, newScan, repoOf, scanLine, toDeviceJson } from '../scripts/lib.mjs'
+import { describeError, FORMAT_VERSION, localDayAndHour, mergeDays, newScan, placeSessions, repoOf, scanLine, toDeviceJson } from '../scripts/lib.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/usage-sync.mjs', import.meta.url))
 const run = promisify(execFile)
@@ -29,31 +29,67 @@ const response = (ts, id, { model = 'claude-opus-5-5', sessionId = 's1', output 
     },
   })
 
-test('a response logged once per content block counts once', () => {
+const sidechain = (line) => JSON.stringify({ ...JSON.parse(line), isSidechain: true })
+
+test('messages count every entry but a subagent\'s; tokens count each API call once, from its fullest entry', () => {
   const scan = newScan()
-  for (const line of [prompt('2026-10-11T08:00:00Z', 'u1'), response('2026-10-11T08:00:01Z', 1), response('2026-10-11T08:00:01Z', 1)]) {
+  for (const line of [
+    prompt('2026-10-11T08:00:00Z', 'u1'),
+    // One call logged per content block: the first entries carry a placeholder output count.
+    response('2026-10-11T08:00:01Z', 1, { output: 2 }),
+    response('2026-10-11T08:00:01Z', 1, { output: 2 }),
+    response('2026-10-11T08:00:02Z', 1, { output: 100 }),
+    sidechain(response('2026-10-11T08:00:03Z', 2)),
+    sidechain(prompt('2026-10-11T08:00:03Z', 'u2')),
+  ]) {
     scanLine(scan, line, 'UTC')
   }
+  placeSessions(scan.days, scan.sessionStarts, 'UTC')
   const day = scan.days['2026-10-11']
   assert.equal(day.sessions, 1)
-  assert.equal(day.messages, 2)
-  assert.equal(day.hours[8], 1)
-  assert.deepEqual(day.models['claude-opus-5-5'], { input: 10, output: 100, cacheRead: 1000, cacheWrite: 50, requests: 1 })
+  assert.equal(day.messages, 4)
+  assert.deepEqual(day.models['claude-opus-5-5'], { input: 20, output: 200, cacheRead: 2000, cacheWrite: 100, requests: 2 })
 })
 
-test('meta entries, other events and broken lines are not counted', () => {
+test('the fullest entry of a call wins whichever order the files are read in', () => {
+  const final = response('2026-10-11T08:00:02Z', 1, { output: 100 })
+  const partial = response('2026-10-11T08:00:01Z', 1, { output: 2 })
+  for (const lines of [[partial, final], [final, partial]]) {
+    const scan = newScan()
+    for (const line of lines) scanLine(scan, line, 'UTC')
+    assert.deepEqual(scan.days['2026-10-11'].models['claude-opus-5-5'], { input: 10, output: 100, cacheRead: 1000, cacheWrite: 50, requests: 1 })
+  }
+})
+
+test('a meta prompt is a message; other events, synthetic responses and broken lines are not counted', () => {
   const scan = newScan()
   scanLine(scan, JSON.stringify({ type: 'user', isMeta: true, timestamp: '2026-10-11T08:00:00Z', uuid: 'm' }), 'UTC')
   scanLine(scan, JSON.stringify({ type: 'attachment', timestamp: '2026-10-11T08:00:00Z' }), 'UTC')
+  scanLine(scan, response('2026-10-11T08:00:00Z', 1, { model: '<synthetic>' }), 'UTC')
   scanLine(scan, '{"type":"user","timestamp":', 'UTC')
-  assert.deepEqual(scan.days, {})
+  assert.equal(scan.days['2026-10-11'].messages, 1)
+  assert.deepEqual(scan.days['2026-10-11'].models, {})
 })
 
-test('with onlyDays, entries on other days are neither counted nor marked seen', () => {
+test('with onlyDays, entries on other days are not counted', () => {
   const scan = newScan()
   assert.equal(scanLine(scan, response('2026-10-10T08:00:00Z', 1), 'UTC', new Set(['2026-10-11'])), undefined)
-  assert.equal(scan.seenResponses.size, 0)
+  assert.deepEqual(scan.days, {})
   assert.equal(scanLine(scan, response('2026-10-11T08:00:00Z', 2), 'UTC', new Set(['2026-10-11'])), '2026-10-11')
+})
+
+test('a session is placed on the day and hour it started, even when only a later day is read', () => {
+  const scan = newScan()
+  scanLine(scan, response('2026-10-10T09:30:00Z', 1), 'UTC')
+  scanLine(scan, response('2026-10-11T14:00:00Z', 2), 'UTC')
+  // A later pass reads only the second day's entries: the start it knew is not lost or moved.
+  const later = newScan(Object.fromEntries(scan.sessionStarts))
+  scanLine(later, response('2026-10-11T15:00:00Z', 3), 'UTC', new Set(['2026-10-11']))
+  placeSessions(later.days, later.sessionStarts, 'UTC')
+  assert.equal(later.days['2026-10-10'].sessions, 1)
+  assert.equal(later.days['2026-10-11'].sessions, 0)
+  assert.equal(later.days['2026-10-10'].hours[9], 1)
+  assert.equal(later.days['2026-10-11'].hours[14], 0)
 })
 
 test('days and hours follow the time zone', () => {
@@ -65,6 +101,12 @@ test('merging keeps the fuller copy of each day', () => {
   const day = (messages) => ({ sessions: 1, messages, hours: new Array(24).fill(0), models: {} })
   const merged = mergeDays({ a: day(5), b: day(9) }, { b: day(3), c: day(1) })
   assert.deepEqual(Object.fromEntries(Object.entries(merged).map(([k, v]) => [k, v.messages])), { a: 5, b: 9, c: 1 })
+})
+
+test('a copy counted under other rules keeps only the days this machine no longer has', () => {
+  const day = (messages) => ({ sessions: 1, messages, hours: new Array(24).fill(0), models: {} })
+  const merged = mergeDays({ a: day(5), b: day(9) }, { b: day(3), c: day(1) }, { preferLocal: true })
+  assert.deepEqual(Object.fromEntries(Object.entries(merged).map(([k, v]) => [k, v.messages])), { a: 5, b: 3, c: 1 })
 })
 
 test('the device file puts each hour array on one line', () => {
@@ -135,7 +177,11 @@ test('a sync uploads the device file, and the next finds it up to date', async (
   const main = join(home, 'projects', 'proj', 's1.jsonl')
   await writeFile(main, [prompt('2026-10-11T08:00:00Z', 'u1'), response('2026-10-11T08:00:01Z', 1)].join('\n') + '\n')
   // A subagent's transcript: same session, its own responses.
-  await writeFile(join(home, 'projects', 'proj', 's1', 'subagents', 'a.jsonl'), response('2026-10-11T08:00:02Z', 2, { model: 'claude-haiku-5-5' }) + '\n')
+  const agent = sidechain(response('2026-10-11T08:00:02Z', 2, { model: 'claude-haiku-5-5' }))
+  await writeFile(join(home, 'projects', 'proj', 's1', 'subagents', 'a.jsonl'), agent + '\n')
+  // A workflow's agents are a folder or two deeper.
+  await mkdir(join(home, 'projects', 'proj', 's1', 'subagents', 'workflows', 'wf_1'), { recursive: true })
+  await writeFile(join(home, 'projects', 'proj', 's1', 'subagents', 'workflows', 'wf_1', 'b.jsonl'), sidechain(response('2026-10-11T08:00:03Z', 3)) + '\n')
 
   await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
   assert.equal(puts().length, 1)
@@ -144,8 +190,11 @@ test('a sync uploads the device file, and the next finds it up to date', async (
   assert.equal(requests[0].auth, 'Bearer secret')
   const day = uploaded().days['2026-10-11']
   assert.equal(uploaded().label, 'Work laptop')
+  assert.equal(uploaded().version, FORMAT_VERSION)
   assert.equal(day.sessions, 1)
-  assert.equal(day.messages, 3)
+  assert.equal(day.hours[8], 1)
+  assert.equal(day.messages, 2)
+  assert.equal(day.models['claude-opus-5-5'].requests, 2)
   assert.deepEqual(Object.keys(day.models).sort(), ['claude-haiku-5-5', 'claude-opus-5-5'])
 
   await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
@@ -153,7 +202,7 @@ test('a sync uploads the device file, and the next finds it up to date', async (
   const log = await readFile(join(home, 'usage-sync', 'sync.log'), 'utf8')
   assert.doesNotMatch(log, /skipped/)
   const { stdout } = await run(process.execPath, [SCRIPT, 'status'], { env: env() })
-  assert.match(stdout, /Up to date: laptop\.json, 1 sessions and 2\.3k tokens over 1 days \(read 0 of 2 transcripts\)/)
+  assert.match(stdout, /Up to date: laptop\.json, 1 sessions and 3\.5k tokens over 1 days \(read 0 of 3 transcripts\)/)
 })
 
 test('only changed transcripts are read, a day they touch is recounted whole, and pruned days stay', async () => {
@@ -169,7 +218,9 @@ test('only changed transcripts are read, a day they touch is recounted whole, an
   await appendFile(today, response('2026-10-11T09:00:00Z', 2) + '\n')
   await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
   assert.equal(uploaded().days['2026-10-11'].messages, 3)
-  assert.equal(uploaded().days['2026-10-11'].sessions, 2)
+  // s0 started on 09-01 and went on to 10-11: it is not a new session there.
+  assert.equal(uploaded().days['2026-10-11'].sessions, 1)
+  assert.equal(uploaded().days['2026-09-01'].sessions, 1)
   const scan = JSON.parse(await readFile(join(home, 'usage-sync', 'scan.json'), 'utf8'))
   assert.deepEqual(scan.files[old].days.sort(), ['2026-09-01', '2026-10-11'])
 
@@ -179,6 +230,9 @@ test('only changed transcripts are read, a day they touch is recounted whole, an
   await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
   assert.deepEqual(Object.keys(uploaded().days), ['2026-09-01', '2026-10-11', '2026-10-12'])
   assert.equal(uploaded().days['2026-10-11'].messages, 3)
+  // Still two sessions in all: the deleted transcript's session keeps its September start.
+  assert.equal(uploaded().days['2026-09-01'].sessions, 1)
+  assert.equal(Object.values(uploaded().days).reduce((n, d) => n + d.sessions, 0), 2)
 })
 
 test('days only the repository still has are kept', async () => {
@@ -189,6 +243,22 @@ test('days only the repository still has are kept', async () => {
   await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
   assert.equal(puts()[0].body.sha, 'sha-0')
   assert.deepEqual(Object.keys(uploaded().days), ['2026-01-01', '2026-10-11'])
+})
+
+test('a copy counted under the old rules is replaced day by day, not kept for being fuller', async () => {
+  await freshMachine()
+  const day = (messages) => ({ sessions: 5, messages, hours: new Array(24).fill(1), models: {} })
+  // No version: the old counting, which made a day fuller or emptier than the device shows.
+  remote = { sha: 'sha-0', text: toDeviceJson({ device: 'laptop', label: 'Laptop', days: { '2026-01-01': day(90), '2026-10-11': day(900) } }) }
+  await writeFile(join(home, 'projects', 'proj', 's1.jsonl'), [prompt('2026-10-11T08:00:00Z', 'u1'), response('2026-10-11T08:00:01Z', 1)].join('\n') + '\n')
+  await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
+  assert.equal(uploaded().version, FORMAT_VERSION)
+  assert.equal(uploaded().days['2026-01-01'].messages, 90)
+  assert.equal(uploaded().days['2026-10-11'].messages, 2)
+  assert.equal(uploaded().days['2026-10-11'].sessions, 1)
+
+  await run(process.execPath, [SCRIPT, 'sync'], { env: env() })
+  assert.equal(puts().length, 1)
 })
 
 test('without a repository the sync fails and status says what to set', async () => {
