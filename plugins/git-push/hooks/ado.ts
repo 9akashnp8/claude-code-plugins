@@ -1,4 +1,4 @@
-import type { PullRequest, PullRequestDraft } from '../types'
+import type { PullRequest } from '../types'
 
 // Azure DevOps Server 2020 and later, and Azure DevOps Services, all answer 6.0; a newer version is refused by older servers.
 const API = 'api-version=6.0'
@@ -6,10 +6,6 @@ const POLICY_API = 'api-version=6.0-preview.1'
 
 // How often an open pull request's status is asked again.
 export const PULL_POLL_MS = 60_000
-
-// Azure DevOps refuses a longer description.
-const DESCRIPTION_LIMIT = 4000
-const TITLE_LIMIT = 400
 
 export type AdoRepo = { collection: string; project: string; repo: string }
 
@@ -152,53 +148,6 @@ export function summaryOf(pull: PullRequest): { text: string; tone: Tone } {
     text: parts.join(' · '),
     tone: isBlocked ? 'error' : pull.changesRequestedBy.length > 0 ? 'warning' : isApproved ? 'success' : 'quiet',
   }
-}
-
-export const PULL_RULES = [
-  'Rules:',
-  '- title: one line of at most 80 characters saying what the change does, in the imperative. When this ' +
-    'conversation names a Jira issue key (such as CPC-123) for the work, start the title with it and a colon.',
-  '- description: Markdown a reviewer reads first. One short paragraph on why the change is needed, then a ' +
-    '"Changes" list of what changed, then a "Testing" list of how it was checked. Only list testing this ' +
-    'conversation shows was done; when none was, say so.',
-  '- Plain words. No secrets, credentials or internal hostnames. Never invent anything.',
-].join('\n')
-
-export const PULL_SHAPE = 'Answer with only this JSON object and nothing else:\n{"title": "", "description": ""}'
-
-export const draftPrompt = (branch: string, target: string, commits: string, diffstat: string) =>
-  [
-    `Draft an Azure DevOps pull request merging branch "${branch}" into "${target}".`,
-    `These commits and files are everything it changes, compared with "${target}".`,
-    `Its commits:\n${commits.trim() || '(none listed)'}`,
-    `Files changed:\n${diffstat.trim() || '(none listed)'}`,
-    'Take what changed from those alone: the "Changes" list names nothing they do not show, even when this ' +
-      'conversation discusses other work. Use the conversation for why the change is needed and how it was tested.',
-    PULL_RULES,
-    PULL_SHAPE,
-  ].join('\n\n')
-
-export const revisePrompt = (current: PullRequestDraft, instruction: string) =>
-  [
-    `This is the current draft of the pull request:\n${JSON.stringify({ title: current.title, description: current.description })}`,
-    `Revise it as follows: ${instruction.trim()}`,
-    PULL_RULES,
-    PULL_SHAPE,
-  ].join('\n\n')
-
-export function parseDraft(reply: string, target: string): PullRequestDraft {
-  const json = reply.slice(reply.indexOf('{'), reply.lastIndexOf('}') + 1)
-  let found: { title?: unknown; description?: unknown } = {}
-  try {
-    found = JSON.parse(json) as typeof found
-  } catch {
-    throw new Error('the model did not answer with a draft')
-  }
-  const title = typeof found.title === 'string' ? found.title.trim().split('\n')[0] ?? '' : ''
-  if (title === '') throw new Error('the model drafted no title')
-  const description = typeof found.description === 'string' ? found.description.trim() : ''
-
-  return { title: title.slice(0, TITLE_LIMIT), description: description.slice(0, DESCRIPTION_LIMIT), target }
 }
 
 // Windows PowerShell 5.1 sends the requests, so a domain password or the Windows session can sign in,
