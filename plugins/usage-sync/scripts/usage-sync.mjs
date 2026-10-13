@@ -18,7 +18,7 @@ import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 
-import { compact, mergeDays, newScan, reasonOf, repoOf, sameDays, scanLine, slugOf, toDeviceJson, totalsOf } from './lib.mjs'
+import { compact, describeError, mergeDays, newScan, reasonOf, repoOf, sameDays, scanLine, slugOf, toDeviceJson, totalsOf } from './lib.mjs'
 
 const API = process.env.USAGE_SYNC_API ?? 'https://api.github.com'
 const LOCK_STALE_MS = 10 * 60 * 1000
@@ -235,12 +235,15 @@ async function sync(isIfDue) {
       `folder=${settings.folder || '(root)'} device=${settings.device} timeZone=${settings.timeZone} ` +
       `token=${settings.token === '' ? 'missing' : 'set'} intervalMin=${settings.intervalMs / 60_000}`,
   )
-  if (isIfDue && state.lastSync !== undefined) {
+  // Only a sync that worked holds this one off: after a failure the next session start tries again.
+  if (isIfDue && state.lastSync?.ok) {
     const ageMs = Date.now() - state.lastSync.at
     if (ageMs < settings.intervalMs) {
-      await log(`not due: last sync was ${Math.round(ageMs / 60_000)} min ago (${state.lastSync.ok ? 'ok' : 'failed'}), interval is ${settings.intervalMs / 60_000} min`)
+      await log(`not due: last sync was ${Math.round(ageMs / 60_000)} min ago, interval is ${settings.intervalMs / 60_000} min`)
       return
     }
+  } else if (isIfDue && state.lastSync !== undefined) {
+    await log('due: the last sync failed, trying again')
   }
   const missing =
     settings.repo === null ? 'the data repository (owner/name)' : settings.token === '' ? 'a GitHub token' : undefined
@@ -268,7 +271,7 @@ async function sync(isIfDue) {
       await log(text)
       return true
     } catch (error) {
-      const text = error instanceof Error ? error.message : String(error)
+      const text = describeError(error)
       await writeFile(paths.state, JSON.stringify({ device: settings.device, where, lastSync: { at, ok: false, text } }))
       throw error
     }
@@ -349,7 +352,7 @@ try {
     process.exitCode = 2
   }
 } catch (error) {
-  const text = error instanceof Error ? error.message : String(error)
+  const text = describeError(error)
   await log(`failed: ${text}`).catch(() => {})
   console.error(`usage-sync: ${text}`)
   process.exitCode = 1

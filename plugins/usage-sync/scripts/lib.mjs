@@ -152,3 +152,18 @@ export function reasonOf(text) {
   }
   return String(text).trim().split('\n')[0]?.slice(0, 200) ?? ''
 }
+
+// An error's message plus the chain of causes behind it. Node's fetch fails with just "fetch failed";
+// what went wrong (ECONNREFUSED, a DNS or certificate error, a timeout) is only in `cause`.
+export function describeError(error) {
+  if (!(error instanceof Error)) return String(error)
+  const part = (e) => [e.code, e.message].filter(Boolean).join(' ')
+  // A connection that tried several addresses fails with an AggregateError whose own message is empty;
+  // the address each attempt failed on is in `errors`.
+  const link = (e) => [part(e), ...(e.errors ?? []).map(part)].filter(Boolean).join('; ')
+  const causes = []
+  for (let cause = error.cause, depth = 0; cause !== undefined && depth < 3; cause = cause?.cause, depth++) {
+    causes.push(cause instanceof Error ? link(cause) : String(cause))
+  }
+  return causes.length === 0 ? error.message : `${error.message} (caused by ${causes.join(' <- ')})`
+}

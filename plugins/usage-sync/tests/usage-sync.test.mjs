@@ -3,13 +3,14 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { createServer as createSocketServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
-import { localDayAndHour, mergeDays, newScan, repoOf, scanLine, toDeviceJson } from '../scripts/lib.mjs'
+import { describeError, localDayAndHour, mergeDays, newScan, repoOf, scanLine, toDeviceJson } from '../scripts/lib.mjs'
 
 const SCRIPT = fileURLToPath(new URL('../scripts/usage-sync.mjs', import.meta.url))
 const run = promisify(execFile)
@@ -224,4 +225,34 @@ test('the SessionStart hook skips a sync inside the interval', async () => {
   const before = requests.length
   await run(process.execPath, [SCRIPT, 'sync', '--if-due'], { env: env() })
   assert.equal(requests.length, before)
+})
+
+test('an error is described with the causes behind it', () => {
+  assert.equal(describeError(new Error('plain')), 'plain')
+  const cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:9'), { code: 'ECONNREFUSED' })
+  assert.equal(describeError(new Error('fetch failed', { cause })), 'fetch failed (caused by ECONNREFUSED connect ECONNREFUSED 127.0.0.1:9)')
+  const several = Object.assign(new AggregateError([cause, cause]), { code: 'ECONNREFUSED' })
+  assert.match(describeError(new Error('fetch failed', { cause: several })), /caused by ECONNREFUSED; ECONNREFUSED connect ECONNREFUSED 127.0.0.1:9; ECONNREFUSED connect/)
+})
+
+// A port nothing listens on: the connection is refused at once.
+async function deadApi() {
+  const probe = createSocketServer()
+  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve))
+  const { port } = probe.address()
+  await new Promise((resolve) => probe.close(resolve))
+  return `http://127.0.0.1:${port}`
+}
+
+test('a failed sync logs why, and the next SessionStart sync tries again', async () => {
+  await freshMachine()
+  await writeFile(join(home, 'projects', 'proj', 's1.jsonl'), response('2026-10-11T08:00:00Z', 1) + '\n')
+  await assert.rejects(run(process.execPath, [SCRIPT, 'sync'], { env: env({ USAGE_SYNC_API: await deadApi() }) }))
+  assert.match(await readFile(join(home, 'usage-sync', 'sync.log'), 'utf8'), /failed: fetch failed \(caused by .*ECONNREFUSED/)
+  const { stdout } = await run(process.execPath, [SCRIPT, 'status'], { env: env() })
+  assert.match(stdout, /failed: fetch failed \(caused by .*ECONNREFUSED/)
+
+  await run(process.execPath, [SCRIPT, 'sync', '--if-due'], { env: env() })
+  assert.equal(puts().length, 1)
+  assert.match(await readFile(join(home, 'usage-sync', 'sync.log'), 'utf8'), /due: the last sync failed, trying again/)
 })
