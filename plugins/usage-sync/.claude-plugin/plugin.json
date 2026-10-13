@@ -1,0 +1,60 @@
+{
+  "name": "usage-sync",
+  "version": "0.2.0",
+  "description": "Syncs this machine's Claude Code token usage to a GitHub repository from session hooks, so usage from every machine adds up in one place.",
+  "author": {
+    "name": "Akash N. Rao"
+  },
+  "userConfig": {
+    "repo": {
+      "type": "string",
+      "title": "Data repository",
+      "description": "The GitHub repository the usage files go to, as owner/name (e.g. 9akashnp8/claude-usage-data). Its branch must already have a commit.",
+      "default": ""
+    },
+    "token": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "A fine-grained personal access token with Contents: read and write on the data repository only.",
+      "sensitive": true
+    },
+    "branch": {
+      "type": "string",
+      "title": "Branch",
+      "description": "The branch the usage files are committed to.",
+      "default": "main"
+    },
+    "folder": {
+      "type": "string",
+      "title": "Folder",
+      "description": "The folder in the repository that holds one <device>.json per machine.",
+      "default": "devices"
+    },
+    "device": {
+      "type": "string",
+      "title": "Device name",
+      "description": "This machine's file name in the repository. Leave empty to use its host name.",
+      "default": ""
+    },
+    "device_label": {
+      "type": "string",
+      "title": "Device label",
+      "description": "How this machine is named on the dashboard, e.g. Work laptop. Leave empty to use the device name.",
+      "default": ""
+    },
+    "time_zone": {
+      "type": "string",
+      "title": "Time zone",
+      "description": "The IANA time zone days and hours are counted in, e.g. Asia/Kolkata. Use the same one on every machine. Leave empty for this machine's.",
+      "default": ""
+    },
+    "sync_interval_minutes": {
+      "type": "number",
+      "title": "Sync interval (minutes)",
+      "description": "A session that starts within this many minutes of the last sync skips its own. A session that ends always syncs.",
+      "default": 60,
+      "min": 5,
+      "max": 1440
+    }
+  }
+}

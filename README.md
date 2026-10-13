@@ -1,6 +1,6 @@
 # claude-code-auto-jira-log
 
-A Claude Code plugin that keeps Jira Cloud up to date with the work you do in Claude Code, a second one, [git-push](#git-push), that pushes your commits from a button, and a third, [worktree-hooks](#worktree-hooks), that starts each worktree from the latest remote branch.
+A Claude Code plugin that keeps Jira Cloud up to date with the work you do in Claude Code, a second one, [git-push](#git-push), that pushes your commits from a button, and a third, [worktree-hooks](#worktree-hooks), that starts each worktree from the latest remote branch, and [usage-sync](#usage-sync), that adds up your Claude Code usage across machines.
 
 - **Link** a worktree to a Jira issue: pick one of your open issues, type a key, or create a new issue drafted from the conversation.
 - **Record** the day's work on that issue as you go: files edited, commits, test runs, pull requests, and Artifacts published.
@@ -154,6 +154,82 @@ Don't enable it alongside `worktree-hooks`: both would answer `WorktreeCreate`.
 
 `FileChanged` only fires for files named in its matcher, so with none it may never fire. Every hook starts Git Bash on Windows, which adds a little time to each tool call: disable the plugin when you are done.
 
+## usage-sync
+
+Another plugin in this marketplace: add up your Claude Code usage across machines. Claude Code only reports usage for the machine it runs on, and an individual plan has no API to ask. This plugin reads each machine's transcripts into daily token counts and commits them to a GitHub repository of yours, one file per machine, for a dashboard to merge.
+
+```
+/plugin install usage-sync@auto-jira-log
+```
+
+It needs Node.js 18 or later on the `PATH`, since its hooks run `node`.
+
+### Set up
+
+1. Create the data repository on GitHub, for example `claude-usage-data`, with a README so its branch has a commit. Make it public if a static site reads it without a token.
+2. Create a fine-grained personal access token at github.com > Settings > Developer settings, with access to that repository only and **Contents: Read and write**.
+3. Fill in the plugin's options when you install it, or later from `/plugin`:
+
+| Option | What it is |
+| --- | --- |
+| Data repository | `owner/name`, or the repository's URL |
+| GitHub token | The token from step 2, kept in the system's credential store |
+| Branch | `main` unless you use another |
+| Folder | Where the device files go, `devices` by default |
+| Device name | This machine's file name, `<device>.json`; empty uses the host name |
+| Device label | The name a dashboard shows, such as `Work laptop` |
+| Time zone | The IANA zone days and hours are counted in, such as `Asia/Kolkata`. Set the same one on every machine; empty uses this machine's |
+| Sync interval | Minutes a starting session waits after the last sync before it syncs again, 60 by default |
+
+Install it on every machine you use Claude Code on, with a different device name on each.
+
+### How it works
+
+Two command hooks run `scripts/usage-sync.mjs`. `SessionEnd` syncs every time a session ends; `SessionStart` syncs when the last sync is older than the interval, which catches a session that was killed before its end hook ran. Each hook starts the sync in a background process and returns at once, so neither starting nor quitting Claude Code waits on the network.
+
+A sync reads the transcripts under `~/.claude/projects` (subagents' included), counts each day's sessions, messages and per-model tokens (input, output, cache read, cache write), reads the device's file from the repository, merges, and commits it if anything changed. The first sync reads every transcript Claude Code still keeps, so the history goes back as far as they do. Later syncs read only the transcripts that changed, plus the others that touch the same days, so a day is always counted whole. Days whose transcripts Claude Code has since deleted keep their last count, and for each day the fuller of the repository's copy and the machine's wins, so the record never shrinks.
+
+The upload is the device's file alone, `devices/<device>.json`:
+
+```json
+{
+  "device": "macbook",
+  "label": "MacBook Pro",
+  "timeZone": "Asia/Kolkata",
+  "updatedAt": "2026-10-12T09:30:00.000Z",
+  "days": {
+    "2026-10-12": {
+      "sessions": 3,
+      "messages": 412,
+      "hours": [0, 0, 0, 0, 0, 0, 0, 0, 0, 37, 52, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+      "models": {
+        "claude-opus-5-5": { "input": 180, "output": 91662, "cacheRead": 19465751, "cacheWrite": 518138, "requests": 90 }
+      }
+    }
+  }
+}
+```
+
+`messages` counts prompts, responses and tool results, as the transcript does, and `hours` counts responses per hour of the day. No prompt, file path, project name or session id leaves the machine.
+
+### Check on it
+
+`/usage-sync:status` shows the device, where it uploads and how the last sync went. Every sync appends a line to `~/.claude/usage-sync/sync.log`, the first place to look when nothing arrives.
+
+To sync by hand from a terminal, give the options as `USAGE_SYNC_<KEY>` variables:
+
+```
+USAGE_SYNC_REPO=me/claude-usage-data USAGE_SYNC_TOKEN=... node <plugin folder>/scripts/usage-sync.mjs sync
+```
+
+Things to know:
+
+- Claude Code deletes transcripts after `cleanupPeriodDays` (30 by default), so install the plugin soon to keep the most history.
+- Sessions on claude.ai/code run in containers the plugin is not in.
+- The state the plugin keeps, `~/.claude/usage-sync/`, survives an uninstall; the repository holds the record either way.
+
+Tests: `node --test plugins/usage-sync/tests/*.test.mjs`.
+
 ## Develop
 
 ```
@@ -162,7 +238,7 @@ claude plugin test plugins/jira-log
 claude --plugin-dir plugins/jira-log
 ```
 
-The same commands work for `plugins/git-push`, `plugins/worktree-hooks` and `plugins/hook-logger`.
+The same commands work for `plugins/git-push`, `plugins/worktree-hooks`, `plugins/hook-logger` and `plugins/usage-sync`.
 
 ### Prompts
 

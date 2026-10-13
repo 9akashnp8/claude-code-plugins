@@ -1,0 +1,25 @@
+{
+  "description": "Syncs this machine's Claude Code usage to a GitHub repository in the background: when a session ends, and when one starts if the last sync is older than the interval.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/usage-sync.mjs\" hook SessionStart"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/usage-sync.mjs\" hook SessionEnd"
+          }
+        ]
+      }
+    ]
+  }
+}
