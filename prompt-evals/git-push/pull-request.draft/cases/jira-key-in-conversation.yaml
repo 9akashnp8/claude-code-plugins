@@ -1,0 +1,24 @@
+# The conversation names CPC-482 and shows the test suite passing and a manual check in Excel.
+- description: a Jira key in the conversation starts the title, and the testing shown is listed
+  metadata:
+    jiraKey: CPC-482
+  vars:
+    conversation: csv-export
+    branch: feature/csv-export
+    target: main
+    commits: |-
+      - Add CSV export endpoint for the monthly report
+        Reuses the report query with the page's filters; amounts keep two decimals, dates are ISO.
+      - Add Export CSV button to the report page
+    diffstat: |-
+       src/reports/export.test.ts | 64 ++++++++++++++++++++
+       src/reports/export.ts      | 48 +++++++++++++++
+       src/reports/monthly.ts     | 12 +++--
+       src/web/ReportPage.tsx     | 21 ++++++-
+       4 files changed, 141 insertions(+), 4 deletions(-)
+  assert:
+    - type: llm-rubric
+      metric: testing-is-what-ran
+      value: >-
+        Pass only if the "Testing" list mentions the automated test suite passing and a manual check that the
+        exported file opens in Excel, and lists no other testing.

@@ -163,3 +163,15 @@ claude --plugin-dir plugins/jira-log
 ```
 
 The same commands work for `plugins/git-push`, `plugins/worktree-hooks` and `plugins/hook-logger`.
+
+### Prompts
+
+A plugin's prompts live in its `hooks/prompts.ts`. [`prompt-evals/`](prompt-evals/README.md) runs them against fixture commits, activity records and conversations with real model calls, and compares versions side by side:
+
+```
+npm install
+npm run eval -- pull-request.draft --baseline main
+npm run eval:view
+```
+
+The calls run through headless Claude Code on your Claude subscription; add `--api` to use the Claude API with `ANTHROPIC_API_KEY` instead.

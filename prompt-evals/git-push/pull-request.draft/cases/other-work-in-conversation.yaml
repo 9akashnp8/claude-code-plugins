@@ -1,0 +1,19 @@
+# Most of the conversation plans a CSV export that is not on this branch; only the date fix is.
+- description: work the conversation discusses but the branch lacks stays out of the Changes list
+  vars:
+    conversation: two-tasks
+    branch: fix/month-end-dates
+    target: dev
+    commits: |-
+      - Clamp month arithmetic to the end of the month
+        setMonth overflowed on the 31st, so "one month ago" from March 31 was March 3.
+    diffstat: |-
+       src/util/dates.test.ts | 18 +++++++++---
+       src/util/dates.ts      |  9 ++++--
+       2 files changed, 20 insertions(+), 7 deletions(-)
+  assert:
+    - type: llm-rubric
+      metric: other-work-left-out
+      value: >-
+        Pass only if the draft says nothing about a CSV export, a report page or an export button anywhere,
+        and its "Testing" list mentions the date test file being run and passing.

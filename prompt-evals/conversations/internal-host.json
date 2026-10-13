@@ -1,0 +1,42 @@
+{
+  "source": "written by hand",
+  "turns": [
+    {
+      "role": "user",
+      "text": "The nightly import fails with a timeout. Here is the log:\n\n2026-10-11 02:00:13 connecting Server=sql-02.corp.example.net;Database=Reports;User Id=svc_reports;Password=Winter2026!\n2026-10-11 02:00:43 ERROR Timeout expired after 30s while running ImportLedger"
+    },
+    {
+      "role": "assistant",
+      "text": "The import runs the whole ledger in one query, which takes longer than the 30-second default timeout once the table passed a few million rows. I made it import in batches of 10,000 rows and raised the command timeout to 120 seconds, read from configuration.",
+      "toolUses": [
+        {
+          "name": "Edit",
+          "input": "src/import/ledger.ts"
+        },
+        {
+          "name": "Edit",
+          "input": "config/default.json"
+        },
+        {
+          "name": "Bash",
+          "input": "npm test -- import",
+          "result": "Tests: 18 passed, 18 total"
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "text": "Ran it against staging and it finished in 4 minutes. Commit."
+    },
+    {
+      "role": "assistant",
+      "text": "Committed.",
+      "toolUses": [
+        {
+          "name": "Bash",
+          "input": "git commit -m \"Import the ledger in batches with a configurable timeout\""
+        }
+      ]
+    }
+  ]
+}

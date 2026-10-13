@@ -1,0 +1,18 @@
+# The person skipped tests; the draft must say so rather than invent any.
+- description: when no testing was done, the Testing list says so
+  vars:
+    conversation: csv-export-untested
+    branch: feature/csv-export
+    target: main
+    commits: |-
+      - Add CSV export to the monthly report
+    diffstat: |-
+       src/reports/export.ts  | 48 +++++++++++++++
+       src/web/ReportPage.tsx | 21 ++++++-
+       2 files changed, 67 insertions(+), 2 deletions(-)
+  assert:
+    - type: llm-rubric
+      metric: testing-is-what-ran
+      value: >-
+        Pass only if the "Testing" list says that no testing was done, or was not shown, and claims no tests,
+        test runs or manual checks.

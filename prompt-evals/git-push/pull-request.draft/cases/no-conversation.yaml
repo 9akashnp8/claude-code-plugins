@@ -1,0 +1,18 @@
+# Nothing to fork yet: the plugin falls back to model.complete with the prompt alone.
+- description: with no conversation, the draft comes from the commits alone and invents no key or testing
+  vars:
+    conversation: []
+    branch: feature/audit-log
+    target: main
+    commits: |-
+      - Record who changed a report's filters
+      - Show the change history on the report settings page
+    diffstat: |-
+       src/audit/log.ts             | 37 ++++++++++++++
+       src/web/ReportSettings.tsx   | 29 +++++++++--
+       2 files changed, 63 insertions(+), 3 deletions(-)
+  assert:
+    - type: llm-rubric
+      metric: testing-is-what-ran
+      value: >-
+        Pass only if the "Testing" list says that no testing was shown or done, and claims no tests or checks.
