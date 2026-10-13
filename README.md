@@ -193,6 +193,7 @@ The upload is the device's file alone, `devices/<device>.json`:
 
 ```json
 {
+  "version": 2,
   "device": "macbook",
   "label": "MacBook Pro",
   "timeZone": "Asia/Kolkata",
@@ -210,7 +211,13 @@ The upload is the device's file alone, `devices/<device>.json`:
 }
 ```
 
-`messages` counts prompts, responses and tool results, as the transcript does, and `hours` counts responses per hour of the day. No prompt, file path, project name or session id leaves the machine.
+The counts follow Claude Code's own stats, so they match what it shows on the machine:
+
+- `messages` counts the main conversation's prompts, tool results and responses. A subagent's entries are not messages, but its tokens are counted.
+- Tokens count each API call once, which is what the API processed, from the call's fullest entry (the one with the most output tokens). Claude Code logs a call once per content block and a resumed session replays earlier entries, so its own stats screen sums every entry and shows about twice these tokens. A subagent's calls count like any other.
+- `sessions` counts each session on the day it started, and `hours` counts sessions started per hour of the day, which is what a peak hour comes from.
+
+The file carries a `version`. A file written under older rules (no `version`) is replaced day by day on the first sync after an update, keeping only days this machine no longer has. No prompt, file path, project name or session id leaves the machine.
 
 ### Check on it
 
