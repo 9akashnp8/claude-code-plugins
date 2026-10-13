@@ -22,7 +22,8 @@ import { compact, mergeDays, newScan, reasonOf, repoOf, sameDays, scanLine, slug
 
 const API = process.env.USAGE_SYNC_API ?? 'https://api.github.com'
 const LOCK_STALE_MS = 10 * 60 * 1000
-const LOG_KEEP_LINES = 300
+const LOG_KEEP_LINES = 500
+const STDIN_WAIT_MS = 300
 
 const option = (key) => (process.env[`CLAUDE_PLUGIN_OPTION_${key}`] ?? process.env[`USAGE_SYNC_${key}`] ?? '').trim()
 
@@ -45,9 +46,11 @@ async function readJson(path, fallback) {
   }
 }
 
+// Every line carries the process id: a hook and the sync it started are two processes, and
+// sessions that end together interleave, so the id is what ties a line to its run.
 async function log(line) {
   await mkdir(stateDir, { recursive: true })
-  await appendFile(paths.log, `${new Date().toISOString()} ${line}\n`)
+  await appendFile(paths.log, `${new Date().toISOString()} [${process.pid}] ${line}\n`)
   const lines = (await readFile(paths.log, 'utf8')).split('\n')
   if (lines.length > LOG_KEEP_LINES * 2) await writeFile(paths.log, lines.slice(-LOG_KEEP_LINES).join('\n'))
 }
@@ -176,6 +179,7 @@ async function upload(settings, local) {
   let refusal = ''
   for (let attempt = 0; attempt < 2; attempt++) {
     const remote = await readRemote(settings, path)
+    await log(`upload attempt ${attempt + 1}: remote file ${remote.file === undefined ? 'does not exist yet' : `found (${remote.sha})`}`)
     const days = mergeDays(remote.file?.days ?? {}, local)
     if (remote.file !== undefined && sameDays(days, remote.file.days)) return { days, isChanged: false }
 
@@ -194,6 +198,7 @@ async function upload(settings, local) {
     })
     if (saved.ok) return { days, isChanged: true }
     refusal = `GitHub answered ${saved.status} writing ${path}: ${reasonOf(await saved.text())}`
+    await log(`upload attempt ${attempt + 1} refused: ${refusal}`)
     // 409 or 422: another machine's session wrote first, so read it again and merge once more.
     // A second refusal is something else (a missing branch, say) and GitHub's words say what.
     if (saved.status !== 409 && saved.status !== 422) break
@@ -225,11 +230,23 @@ async function withLock(work) {
 async function sync(isIfDue) {
   const state = await readJson(paths.state, {})
   const settings = await settingsOf(state)
-  if (isIfDue && state.lastSync !== undefined && Date.now() - state.lastSync.at < settings.intervalMs) return
+  await log(
+    `sync ${isIfDue ? '--if-due ' : ''}started: repo=${settings.repo ?? '(unset)'} branch=${settings.branch} ` +
+      `folder=${settings.folder || '(root)'} device=${settings.device} timeZone=${settings.timeZone} ` +
+      `token=${settings.token === '' ? 'missing' : 'set'} intervalMin=${settings.intervalMs / 60_000}`,
+  )
+  if (isIfDue && state.lastSync !== undefined) {
+    const ageMs = Date.now() - state.lastSync.at
+    if (ageMs < settings.intervalMs) {
+      await log(`not due: last sync was ${Math.round(ageMs / 60_000)} min ago (${state.lastSync.ok ? 'ok' : 'failed'}), interval is ${settings.intervalMs / 60_000} min`)
+      return
+    }
+  }
   const missing =
     settings.repo === null ? 'the data repository (owner/name)' : settings.token === '' ? 'a GitHub token' : undefined
   if (missing !== undefined) {
     const text = `not set up: set ${missing} in the plugin's options (/plugin, usage-sync)`
+    await log(text)
     const lastSync = { at: Date.now(), ok: false, text }
     await mkdir(stateDir, { recursive: true })
     await writeFile(paths.state, JSON.stringify({ device: settings.device, where: 'not set up', lastSync }))
@@ -241,6 +258,7 @@ async function sync(isIfDue) {
     const where = `${settings.repo}@${settings.branch}:${contentsPath(settings).split('/contents/')[1]}`
     try {
       const scanned = await scanTranscripts(settings.timeZone)
+      await log(`scanned: read ${scanned.read} of ${scanned.total} transcripts, ${Object.keys(scanned.days).length} days; uploading to ${where}`)
       const { days, isChanged } = await upload(settings, scanned.days)
       const { sessions, tokens } = totalsOf(days)
       const text =
@@ -275,13 +293,49 @@ async function status() {
   )
 }
 
+// What Claude Code writes to a hook's stdin (session id, why it started or ended, ...). Waits for
+// a complete JSON document, but never long: a hook must return at once.
+function readHookInput() {
+  return new Promise((resolve) => {
+    let text = ''
+    const finish = () => {
+      clearTimeout(timer)
+      process.stdin.pause()
+      try {
+        resolve(JSON.parse(text))
+      } catch {
+        resolve(text === '' ? undefined : { unparsed: text.slice(0, 200) })
+      }
+    }
+    const timer = setTimeout(finish, STDIN_WAIT_MS)
+    process.stdin.setEncoding('utf8')
+    process.stdin.on('error', finish)
+    process.stdin.on('end', finish)
+    process.stdin.on('data', (chunk) => {
+      text += chunk
+      try {
+        JSON.parse(text)
+        finish()
+      } catch {
+        // not all here yet
+      }
+    })
+  })
+}
+
 // A hook returns at once and the sync runs on in its own process group, so neither starting nor
 // quitting Claude Code waits on the network, and quitting does not cut the sync short.
 async function hook(event) {
-  process.stdin.resume()
-  process.stdin.on('error', () => {})
+  const input = await readHookInput()
+  const options = Object.keys(process.env).filter((key) => key.startsWith('CLAUDE_PLUGIN_OPTION_')).map((key) => key.slice('CLAUDE_PLUGIN_OPTION_'.length))
+  await log(
+    `hook ${event} fired: session=${input?.session_id ?? '?'} ${input?.source ?? input?.reason ?? ''} node=${process.version} ` +
+      `pluginRoot=${process.env.CLAUDE_PLUGIN_ROOT ?? '(unset)'} options=[${options.join(',')}]`,
+  )
   const args = [fileURLToPath(import.meta.url), 'sync', ...(event === 'SessionStart' ? ['--if-due'] : [])]
-  spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true, env: process.env }).unref()
+  const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true, env: process.env })
+  child.unref()
+  await log(child.pid === undefined ? 'hook could not start the sync process' : `hook started sync process ${child.pid}: ${args.slice(1).join(' ')}`)
   process.exit(0)
 }
 
