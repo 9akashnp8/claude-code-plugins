@@ -15,6 +15,10 @@ export type PullRequest = {
   status: 'active' | 'completed' | 'abandoned'
   isDraft: boolean
   hasConflicts: boolean
+  // The branch it merges into.
+  target: string
+  // While it has conflicts, which merge Azure DevOps found them in; null without conflicts.
+  conflictKey: string | null
   approved: number
   reviewers: number
   rejectedBy: string[]
@@ -36,10 +40,11 @@ export type FailedStep = {
 
 export type BuildFailure = { buildId: number; definition: string; url: string; steps: FailedStep[] }
 
-// Where a fix of the pull request's failed build has got to.
-export type BuildFix = { stage: 'reading' | 'fixing' | 'pushing' }
+// Where a fix of the pull request's failed build, or of its conflicts, has got to: reading the build or merging the
+// target in, Claude's turn, then the push.
+export type PullFix = { kind: 'build' | 'conflicts'; stage: 'reading' | 'merging' | 'fixing' | 'pushing' }
 
-// What Claude said a person must do about the failed build, and the failures it was about.
+// What Claude said a person must do about a failed build or the conflicts, and the failures it was about.
 export type Escalation = { reason: string; keys: string[] }
 
 export type PullRequestDraft = { title: string; description: string; target: string }
@@ -57,7 +62,7 @@ declare module 'claude-code' {
       bases: string[]
       busy: string | null
       notice: string | null
-      fix: BuildFix | null
+      fix: PullFix | null
       escalation: Escalation | null
     }
   }

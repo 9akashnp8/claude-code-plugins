@@ -14,6 +14,11 @@ export type Repo = {
   // What git for-each-ref prints for origin's branches: "<name> <its commits HEAD lacks> <HEAD's commits it lacks>".
   // Null for a git too old to know %(ahead-behind).
   remoteBranches: string | null
+  // What git status --porcelain --untracked-files=no prints, a line each.
+  changes: string[]
+  // The files a merge of origin/<target> leaves in conflict; empty when it merges cleanly.
+  conflicts: string[]
+  isMerging: boolean
 }
 
 export type Server = {
@@ -60,6 +65,9 @@ export const activePull = (fields: Partial<RawPullRequest> = {}): RawPullRequest
   title: 'CPC-7: Add export',
   status: 'active',
   mergeStatus: 'succeeded',
+  targetRefName: 'refs/heads/main',
+  lastMergeSourceCommit: { commitId: 'source-1' },
+  lastMergeTargetCommit: { commitId: 'target-1' },
   repository: { project: { id: 'project-1' } },
   reviewers: [],
   ...fields,
@@ -78,6 +86,9 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     remote: 'https://github.com/team/repo.git',
     credential: '',
     remoteBranches: ['HEAD 0 0', 'feature/export 0 0', 'main 0 2'].join('\n'),
+    changes: [],
+    conflicts: [],
+    isMerging: false,
     ...start,
   }
   const server: Server = {
@@ -162,6 +173,17 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
       return repo.credential === '' ? answer(128, '', 'fatal: terminal prompts disabled') : answer(0, repo.credential)
     }
     if (command === 'fetch --prune origin') return answer(0)
+    if (command === 'rev-parse -q --verify MERGE_HEAD') return repo.isMerging ? answer(0, 'abc123\n') : answer(1)
+    if (command === 'status --porcelain --untracked-files=no') return answer(0, repo.changes.join('\n'))
+    if (command === 'diff --name-only --diff-filter=U') return answer(0, repo.conflicts.join('\n'))
+    if (command.startsWith('merge --no-edit origin/')) {
+      if (repo.conflicts.length > 0) {
+        repo.isMerging = true
+        return answer(1, repo.conflicts.map(file => `CONFLICT (content): Merge conflict in ${file}`).join('\n'))
+      }
+      repo.ahead += 1
+      return answer(0, 'Merge made by the \'ort\' strategy.\n')
+    }
     if (command.startsWith('for-each-ref')) {
       return repo.remoteBranches === null
         ? answer(128, '', 'fatal: unknown field name: ahead-behind:HEAD')

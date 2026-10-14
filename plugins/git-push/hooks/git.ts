@@ -17,6 +17,24 @@ export const FETCH = ['fetch', '--prune', REMOTE]
 
 export const FETCH_TIMEOUT_MS = 60_000
 
+// Exits 0 while a merge is in progress.
+export const MERGE_HEAD = ['rev-parse', '-q', '--verify', 'MERGE_HEAD']
+
+// Changes to tracked files; an untracked file does not stop a merge unless the merge would write over it.
+export const CHANGES = ['status', '--porcelain', '--untracked-files=no']
+
+// The files a merge in progress left in conflict.
+export const UNMERGED = ['diff', '--name-only', '--diff-filter=U']
+
+// A merge, not a rebase: the branch is published and under review, so its commits stay as they are.
+export const mergeOf = (target: string) => ['merge', '--no-edit', `${REMOTE}/${target}`]
+
+export const linesOf = (stdout: string) =>
+  stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line !== '')
+
 // Each branch of origin and how far it is from HEAD, in one call: "<name> <its commits HEAD lacks> <HEAD's commits it lacks>".
 // %(ahead-behind) needs git 2.41; an older git refuses it, and the pull request falls back to the default branch.
 export const BRANCH_DISTANCES = ['for-each-ref', '--format=%(refname:lstrip=3) %(ahead-behind:HEAD)', `refs/remotes/${REMOTE}`]

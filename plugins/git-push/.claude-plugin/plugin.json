@@ -1,7 +1,7 @@
 {
   "name": "git-push",
-  "version": "0.4.0",
-  "description": "Pushes the branch and opens its Azure DevOps pull request from buttons above the prompt, then shows the pull request's status there and hands a failed build to Claude to fix.",
+  "version": "0.5.0",
+  "description": "Pushes the branch and opens its Azure DevOps pull request from buttons above the prompt, then shows the pull request's status there and hands a failed build or merge conflicts to Claude to fix.",
   "author": { "name": "Akash N. Rao" },
   "types": "./types/index.d.ts"
 }
