@@ -20,7 +20,27 @@ export type PullRequest = {
   rejectedBy: string[]
   changesRequestedBy: string[]
   checks: { passed: number; failed: number; running: number }
+  // The build validation policies whose last build failed, each with that build.
+  failedBuilds: FailedBuild[]
 }
+
+export type FailedBuild = { evaluationId: string; buildId: number }
+
+export type FailedStep = {
+  name: string
+  // The step's own error lines, as the timeline reports them.
+  errors: string[]
+  // The last lines of its log, timestamps dropped; empty for a job or stage, which has none.
+  log: string
+}
+
+export type BuildFailure = { buildId: number; definition: string; url: string; steps: FailedStep[] }
+
+// Where a fix of the pull request's failed build has got to.
+export type BuildFix = { stage: 'reading' | 'fixing' | 'pushing' }
+
+// What Claude said a person must do about the failed build, and the failures it was about.
+export type Escalation = { reason: string; keys: string[] }
 
 export type PullRequestDraft = { title: string; description: string; target: string }
 
@@ -37,6 +57,8 @@ declare module 'claude-code' {
       bases: string[]
       busy: string | null
       notice: string | null
+      fix: BuildFix | null
+      escalation: Escalation | null
     }
   }
 }
