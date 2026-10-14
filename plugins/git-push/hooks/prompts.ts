@@ -144,3 +144,28 @@ export function outcomeOf(answer: string): FixOutcome {
 
   return { kind: 'fixed' }
 }
+
+export type ConflictInput = { pullId: number; branch: string; target: string; files: readonly string[] }
+
+export const conflictHeader = (pullId: number) => `Pull request #${pullId} has merge conflicts.`
+
+export const conflictPrompt = ({ pullId, branch, target, files }: ConflictInput) =>
+  [
+    `${conflictHeader(pullId)} The git-push plugin merged "origin/${target}" into "${branch}", and the merge is ` +
+      'in progress here.',
+    files.length > 0
+      ? `These files are in conflict:\n${files.map(file => `- ${file}`).join('\n')}`
+      : 'Every conflict is already resolved; the merge only needs concluding.',
+    [
+      'Resolve them:',
+      `- Keep the intent of both sides: what this branch changes, and what "${target}" changed since the branch ` +
+        'was cut. Do not take one side whole. Where the intent is unclear, read the commits that touched the ' +
+        'file on each side (`git log --merge -p -- <file>`).',
+      '- Check the result the way the build does where you can: build it and run the tests that cover the files.',
+      '- `git add` the resolved files and conclude the merge with `git commit --no-edit`. Do not rebase, abort ' +
+        'the merge or push: the plugin pushes the merge commit when you finish.',
+      '- If a conflict needs a decision only a person can make (both sides changed the same behaviour in ways ' +
+        'that cannot both hold), leave the merge in progress as it is and end your reply with the line ' +
+        '"ESCALATE: <the decision needed>".',
+    ].join('\n'),
+  ].join('\n\n')

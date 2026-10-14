@@ -30,6 +30,9 @@ export type RawPullRequest = {
   status: string
   isDraft?: boolean
   mergeStatus?: string
+  targetRefName?: string
+  lastMergeSourceCommit?: { commitId?: string }
+  lastMergeTargetCommit?: { commitId?: string }
   repository?: { project?: { id?: string } }
   reviewers?: { displayName: string; vote: number; isContainer?: boolean }[]
 }
@@ -148,6 +151,7 @@ export function toPullRequest(
       ? [{ evaluationId: one.evaluationId, buildId: one.context.buildId }]
       : [],
   )
+  const hasConflicts = raw.mergeStatus === 'conflicts'
 
   return {
     id: raw.pullRequestId,
@@ -157,7 +161,12 @@ export function toPullRequest(
     projectId: raw.repository?.project?.id ?? '',
     status,
     isDraft: raw.isDraft === true,
-    hasConflicts: raw.mergeStatus === 'conflicts',
+    hasConflicts,
+    target: branchOfRef(raw.targetRefName ?? ''),
+    // The merge Azure DevOps last tried: a push to either branch makes a new one, and a new key.
+    conflictKey: hasConflicts
+      ? `conflicts:${raw.lastMergeSourceCommit?.commitId ?? ''}:${raw.lastMergeTargetCommit?.commitId ?? ''}`
+      : null,
     approved: people.filter(reviewer => reviewer.vote >= 5).length,
     reviewers: people.length,
     rejectedBy: people.filter(reviewer => reviewer.vote <= -10).map(reviewer => reviewer.displayName),

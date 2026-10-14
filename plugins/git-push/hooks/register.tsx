@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnCompleteInput } from 'claude-code'
 
-import type { BuildFailure, BuildFix, FailedBuild, PullRequest, Unpushed } from '../types'
+import type { BuildFailure, FailedBuild, PullFix, PullRequest, Unpushed } from '../types'
 import {
   adoRepoOf,
   branchOfRef,
@@ -46,19 +46,33 @@ import {
 import {
   basesOf,
   BRANCH_DISTANCES,
+  CHANGES,
   describe,
   distancesOf,
   failureOf,
   FETCH,
   FETCH_TIMEOUT_MS,
   isSame,
+  linesOf,
+  MERGE_HEAD,
+  mergeOf,
   NEW_COMMITS,
   POLL_MS,
   PUSH,
   PUSH_TIMEOUT_MS,
   REMOTE,
+  UNMERGED,
 } from './git'
-import { draftPrompt, fixHeader, fixPrompt, outcomeOf, parseDraft, revisePrompt } from './prompts'
+import {
+  conflictHeader,
+  conflictPrompt,
+  draftPrompt,
+  fixHeader,
+  fixPrompt,
+  outcomeOf,
+  parseDraft,
+  revisePrompt,
+} from './prompts'
 
 type Engine = EngineInterface
 
@@ -85,19 +99,24 @@ let authMode: AuthMode | undefined
 const defaultBranches = new Map<string, string>()
 // Typed into the title field and not yet submitted.
 let typedTitle: string | undefined
-// The failed builds a fix was started for, by failureKey: no second button for them until each is seen not failing,
-// as when it is queued again after a push or its stages are retried.
+// The failed builds a fix was started for, by failureKey, and the conflicts, by conflictKey: no second button for
+// one until it is seen not failing, as when a build is queued again or Azure DevOps tries the merge again.
 const handled = new Set<string>()
 // The fix turn in flight, known by the prompt's first line once it starts.
-let fixTurn: {
+type FixTurn = {
+  kind: PullFix['kind']
   header: string
   turnId?: string
   isSubmitted: boolean
   pullId: number
   branch: string
+  // What the fix is for, as handled holds it.
+  keys: string[]
+  // A build fix's builds, and what failed in them.
   failed: FailedBuild[]
   signature: string
-} | null = null
+}
+let fixTurn: FixTurn | null = null
 // What the last fix was for, so the same failure coming back is said to Claude.
 let lastFix: { pullId: number; signature: string } | null = null
 
@@ -254,7 +273,7 @@ function refreshPull($: Engine) {
 
 // A failure no longer failing is forgotten, and what Claude said a person must do about it with it.
 async function forgetPassed($: Engine, shown: PullRequest | null) {
-  const failing = new Set((shown?.failedBuilds ?? []).map(failureKey))
+  const failing = new Set([...(shown?.failedBuilds ?? []).map(failureKey), ...(shown?.conflictKey ? [shown.conflictKey] : [])])
   for (const key of handled) if (!failing.has(key)) handled.delete(key)
   const said = await read($, escalation)
   if (said !== null && !said.keys.some(key => failing.has(key))) await update($, escalation, () => null)
@@ -297,25 +316,48 @@ async function readFailure($: Engine, branch: Branch & { repo: AdoRepo }, buildI
   }
 }
 
-// Reads what failed and hands it to Claude as a turn of its own; finishFix takes it from there.
-async function startFix($: Engine) {
+// The pull request a fix starts from: on the branch checked out, with no other fix running.
+async function fixable($: Engine) {
   const [branch, shown] = [readyOf(current), await read($, pull)]
-  if (branch === null || shown === null || shown.branch !== branch.branch || (await read($, fix)) !== null) return
+  const isFree = (await read($, fix)) === null
+
+  return branch !== null && shown !== null && shown.branch === branch.branch && isFree ? { branch, shown } : null
+}
+
+// Hands the prompt to Claude as a turn of its own; finishFix takes it from there.
+async function submitFix($: Engine, turn: FixTurn, text: string) {
+  fixTurn = turn
+  await update($, fix, () => ({ kind: turn.kind, stage: 'fixing' }))
+  await $.prompt.submit({ text })
+  turn.isSubmitted = true
+  turn.keys.forEach(key => handled.add(key))
+}
+
+// Reads what failed for Claude to fix.
+async function startBuildFix($: Engine) {
+  const found = await fixable($)
+  if (found === null) return
+  const { branch, shown } = found
   const failed = shown.failedBuilds.filter(one => !handled.has(failureKey(one)))
   if (failed.length === 0) return
-  await update($, fix, () => ({ stage: 'reading' }))
+  await update($, fix, () => ({ kind: 'build', stage: 'reading' }))
   await update($, escalation, () => null)
   try {
     const failures: BuildFailure[] = []
     for (const one of failed) failures.push(await readFailure($, branch, one.buildId))
     const signature = signatureOf(failures)
     const isRepeat = lastFix?.pullId === shown.id && lastFix.signature === signature
-    const turn = { header: fixHeader(shown.id), isSubmitted: false, pullId: shown.id, branch: branch.branch, failed, signature }
-    fixTurn = turn
-    await update($, fix, () => ({ stage: 'fixing' }))
-    await $.prompt.submit({ text: fixPrompt({ pullId: shown.id, branch: branch.branch, failures, isRepeat }) })
-    turn.isSubmitted = true
-    failed.forEach(one => handled.add(failureKey(one)))
+    const turn: FixTurn = {
+      kind: 'build',
+      header: fixHeader(shown.id),
+      isSubmitted: false,
+      pullId: shown.id,
+      branch: branch.branch,
+      keys: failed.map(failureKey),
+      failed,
+      signature,
+    }
+    await submitFix($, turn, fixPrompt({ pullId: shown.id, branch: branch.branch, failures, isRepeat }))
   } catch (error) {
     fixTurn = null
     await update($, fix, () => null)
@@ -323,35 +365,95 @@ async function startFix($: Engine) {
   }
 }
 
+// Merges the target in here, then hands the files in conflict to Claude. A merge already in progress is picked up
+// as it stands, so a fix that left one unfinished can be finished.
+async function startConflictFix($: Engine) {
+  const found = await fixable($)
+  if (found === null) return
+  const { branch, shown } = found
+  const key = shown.conflictKey
+  if (key === null || handled.has(key) || shown.target === '') return
+  await update($, fix, () => ({ kind: 'conflicts', stage: 'merging' }))
+  await update($, escalation, () => null)
+  let isMergedClean = false
+  try {
+    if ((await git($, MERGE_HEAD)).exitCode !== 0) {
+      if (linesOf((await git($, CHANGES)).stdout).length > 0) {
+        throw new Error('commit or stash your changes first, so the merge holds nothing else')
+      }
+      const fetched = await git($, FETCH, { timeoutMs: FETCH_TIMEOUT_MS })
+      if (fetched.exitCode !== 0) throw new Error(failureOf(fetched.stderr))
+      const merged = await git($, mergeOf(shown.target), { timeoutMs: FETCH_TIMEOUT_MS })
+      if (merged.exitCode === 0) {
+        // Git merged it alone, as Azure DevOps could not: nothing for Claude to resolve.
+        handled.add(key)
+        $.ui.toast(`Merged ${REMOTE}/${shown.target} with no conflicts here; pushing it`)
+        await refresh($)
+        isMergedClean = true
+        await update($, fix, () => ({ kind: 'conflicts', stage: 'pushing' }))
+        await push($)
+        return
+      }
+      if ((await git($, MERGE_HEAD)).exitCode !== 0) throw new Error(failureOf(merged.stderr))
+    }
+    const files = linesOf((await git($, UNMERGED)).stdout)
+    const turn: FixTurn = {
+      kind: 'conflicts',
+      header: conflictHeader(shown.id),
+      isSubmitted: false,
+      pullId: shown.id,
+      branch: branch.branch,
+      keys: [key],
+      failed: [],
+      signature: '',
+    }
+    await submitFix($, turn, conflictPrompt({ pullId: shown.id, branch: branch.branch, target: shown.target, files }))
+  } catch (error) {
+    fixTurn = null
+    $.ui.toast(`Could not fix the conflicts: ${message(error)}`)
+  } finally {
+    if (isMergedClean || fixTurn === null) await update($, fix, () => null)
+  }
+}
+
+const SUBJECT = { build: 'The build', conflicts: 'The conflicts' } as const
+
 // After the fix turn: Claude's commit is pushed, RETRY queues the build again, ESCALATE is shown and notified.
 async function finishFix($: Engine, e: TurnCompleteInput) {
   const done = fixTurn
   fixTurn = null
   if (done === null) return
-  const keys = done.failed.map(failureKey)
+  const { keys } = done
   // The button comes back for a fix that did not finish or committed nothing.
   const offerAgain = () => keys.forEach(key => handled.delete(key))
+  const subject = SUBJECT[done.kind]
   try {
     if (e.reason !== 'answer') {
       offerAgain()
-      $.ui.toast('The build fix stopped before it finished')
+      $.ui.toast(`${subject} fix stopped before it finished`)
       return
     }
-    lastFix = { pullId: done.pullId, signature: done.signature }
+    if (done.kind === 'build') lastFix = { pullId: done.pullId, signature: done.signature }
     const outcome = outcomeOf(e.answer)
     if (outcome.kind === 'escalate') {
       await update($, escalation, () => ({ reason: outcome.reason, keys }))
-      await $.ui.notify(`PR #${done.pullId}: ${outcome.reason}`, { title: 'The build needs you' }).catch(() => undefined)
+      const title = `${subject} ${done.kind === 'build' ? 'needs' : 'need'} you`
+      await $.ui.notify(`PR #${done.pullId}: ${outcome.reason}`, { title }).catch(() => undefined)
       return
     }
     await refresh($)
     const branch = readyOf(current)
     if (branch === null || branch.branch !== done.branch) {
       offerAgain()
-      $.ui.toast(`The build fix was left alone: ${done.branch} is no longer checked out`)
+      $.ui.toast(`${subject} fix was left alone: ${done.branch} is no longer checked out`)
       return
     }
-    if (outcome.kind === 'retry') {
+    if (done.kind === 'conflicts' && (await git($, MERGE_HEAD)).exitCode === 0) {
+      offerAgain()
+      $.ui.toast('Claude left the merge unfinished: Fix conflicts picks it up where it stopped')
+      return
+    }
+    if (done.kind === 'build' && outcome.kind === 'retry') {
       const requeues = done.failed.map(one => ({ method: 'PATCH' as const, url: requeueUrl(branch.repo, one.evaluationId) }))
       const refused = (await ado($, branch.remote, requeues)).find(answer => answer.status < 200 || answer.status >= 300)
       if (refused !== undefined) offerAgain()
@@ -365,14 +467,14 @@ async function finishFix($: Engine, e: TurnCompleteInput) {
     }
     if (branch.ahead === 0) {
       offerAgain()
-      $.ui.toast('Claude committed no fix for the build')
+      $.ui.toast(done.kind === 'build' ? 'Claude committed no fix for the build' : 'Claude committed no merge')
       return
     }
-    await update($, fix, () => ({ stage: 'pushing' }))
+    await update($, fix, () => ({ kind: done.kind, stage: 'pushing' }))
     await push($)
   } catch (error) {
     offerAgain()
-    $.ui.toast(`The build fix failed: ${message(error)}`)
+    $.ui.toast(`${subject} fix failed: ${message(error)}`)
   } finally {
     await update($, fix, () => null)
   }
@@ -510,10 +612,16 @@ async function discard($: Engine) {
   await $.ui.close({ id: PANE })
 }
 
-const FIX_STAGES: Record<BuildFix['stage'], string> = {
-  reading: 'Reading the failed build…',
-  fixing: 'Claude is fixing the build…',
-  pushing: 'Pushing the fix…',
+const FIX_STAGES = {
+  build: { reading: 'Reading the failed build…', fixing: 'Claude is fixing the build…' },
+  conflicts: { merging: 'Merging the target branch in…', fixing: 'Claude is resolving the conflicts…' },
+} as const
+
+function stageOf({ kind, stage }: PullFix) {
+  if (stage === 'pushing') return kind === 'build' ? 'Pushing the fix…' : 'Pushing the merge…'
+  const stages: Partial<Record<PullFix['stage'], string>> = FIX_STAGES[kind]
+
+  return stages[stage] ?? ''
 }
 
 const TONE_PROPS = {
@@ -564,12 +672,9 @@ export const register: Register = on => {
     const canCreate = ready !== null && !pushing && (pr === null || pr.status === 'abandoned')
     const fixing = await read($, fix)
     const said = await read($, escalation)
-    const canFix =
-      pr !== null &&
-      pr.status === 'active' &&
-      fixing === null &&
-      !e.props.isWorking &&
-      pr.failedBuilds.some(one => !handled.has(failureKey(one)))
+    const canFix = pr !== null && pr.status === 'active' && fixing === null && !e.props.isWorking
+    const canFixBuild = canFix && pr.failedBuilds.some(one => !handled.has(failureKey(one)))
+    const canFixConflicts = canFix && pr.conflictKey !== null && pr.target !== '' && !handled.has(pr.conflictKey)
     if (pending === null && !pushing && pr === null && !canCreate) return next(e)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     // The band holds one tree: stack what the plugins beneath draw (jira-log's line) under ours,
@@ -584,8 +689,13 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1}>
           {pr !== null && <Link href={pr.url} label={`PR #${pr.id}`} />}
           {summary !== null && <Text {...TONE_PROPS[summary.tone]}>{summary.text}</Text>}
-          {canFix && <Button key="fix-build" label="Fix build" variant="primary" onPress={() => void startFix($)} />}
-          {pr !== null && fixing !== null && <Text dimColor>{FIX_STAGES[fixing.stage]}</Text>}
+          {canFixConflicts && (
+            <Button key="fix-conflicts" label="Fix conflicts" variant="primary" onPress={() => void startConflictFix($)} />
+          )}
+          {canFixBuild && (
+            <Button key="fix-build" label="Fix build" variant="primary" onPress={() => void startBuildFix($)} />
+          )}
+          {pr !== null && fixing !== null && <Text dimColor>{stageOf(fixing)}</Text>}
           {pr !== null && hasBranchPart && <Text dimColor>·</Text>}
           {pending !== null && <Text dimColor>{describe(pending)}</Text>}
           {canCreate && pending === null && <Text dimColor>{ready} · on {REMOTE}</Text>}

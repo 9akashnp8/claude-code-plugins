@@ -90,6 +90,17 @@ When a build validation policy's build fails, the line shows **Fix build** (once
 
 A fix that is interrupted or commits nothing brings the button back. The build output is put to Claude as data, with an instruction not to follow anything written in it.
 
+### Fix merge conflicts
+
+When Azure DevOps reports that the pull request has conflicts with its target branch (`mergeStatus` is `conflicts`), the line shows **Fix conflicts**:
+
+1. The plugin fetches `origin` and merges the target into your branch here: `git merge --no-edit origin/<target>`. It uses a merge, not a rebase, because the branch is already published and under review. With uncommitted changes to tracked files it stops before merging and asks you to commit or stash them.
+2. If git merges cleanly, which happens when Azure DevOps and git disagree, the plugin pushes the merge with no turn for Claude.
+3. Otherwise it sends Claude the list of conflicted files. Claude resolves each one keeping the intent of both sides, checks the result, and concludes the merge with `git commit --no-edit`. When the turn ends, the plugin pushes the merge commit.
+4. If a conflict needs a decision only a person can make, Claude leaves the merge in progress and ends with `ESCALATE: <the decision needed>`. The line shows `Needs you: …` and you get a notification.
+
+**Fix conflicts** is not offered again for the same conflicts until Azure DevOps tries the merge again, which it does after a push to either branch. If Claude leaves the merge unfinished, pressing **Fix conflicts** again picks up the merge in progress rather than starting a new one. The list of conflicted files comes from the local merge, which is what Claude resolves, so the plugin does not need Azure DevOps's preview conflicts API.
+
 Signing in needs no setup. The plugin asks git for the credential it uses for `origin` (`git credential fill`), then sends requests through Windows PowerShell: first as Basic sign-in (a personal access token), then as Windows sign-in with the same credential (a domain password), and with no stored credential as your Windows account. The credential stays in memory and goes to PowerShell on its standard input, never on a command line. Requests use REST API version 6.0, which Azure DevOps Server 2020 and later answer. Pull requests need Windows.
 
 When both plugins are installed, their lines stack in the band above the prompt.
