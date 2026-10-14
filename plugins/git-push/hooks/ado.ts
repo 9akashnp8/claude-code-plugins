@@ -1,15 +1,22 @@
-import type { PullRequest } from '../types'
+import type { BuildFailure, FailedBuild, PullRequest } from '../types'
 
 // Azure DevOps Server 2020 and later, and Azure DevOps Services, all answer 6.0; a newer version is refused by older servers.
 const API = 'api-version=6.0'
 const POLICY_API = 'api-version=6.0-preview.1'
 
 // How often an open pull request's status is asked again.
-export const PULL_POLL_MS = 60_000
+export const PULL_POLL_MS = 30_000
+
+// How much of a failed step's log goes to Claude: its last lines, each step's share capped.
+export const LOG_TAIL_LINES = 150
+const LOG_CHARS = 6000
+const ERRORS_PER_STEP = 10
+// The first failures are usually the cause; the rest follow from them.
+const FAILED_STEPS = 5
 
 export type AdoRepo = { collection: string; project: string; repo: string }
 
-export type AdoRequest = { method: 'GET' | 'POST'; url: string; body?: unknown }
+export type AdoRequest = { method: 'GET' | 'POST' | 'PATCH'; url: string; body?: unknown }
 
 export type AdoResponse = { status: number; text: string }
 
@@ -27,7 +34,27 @@ export type RawPullRequest = {
   reviewers?: { displayName: string; vote: number; isContainer?: boolean }[]
 }
 
-export type RawEvaluation = { status: string; configuration?: { isEnabled?: boolean } }
+// A build validation policy's evaluation names, in context.buildId, the build it last queued: requeued or rerun
+// after a push, the same evaluation names the new build. "Retry failed stages" reruns inside the same build.
+export type RawEvaluation = {
+  evaluationId?: string
+  status: string
+  configuration?: { isEnabled?: boolean }
+  context?: { buildId?: unknown }
+}
+
+export type RawBuild = { id: number; buildNumber?: string; definition?: { name?: string } }
+
+export type RawTimelineRecord = {
+  type: string
+  name: string
+  result?: string | null
+  order?: number
+  log?: { id: number } | null
+  issues?: { type: string; message?: string }[] | null
+}
+
+export type RawLog = { id: number; lineCount?: number }
 
 // https://server/tfs/Collection/Project/_git/Repo, https://dev.azure.com/org/Project/_git/Repo or
 // https://org.visualstudio.com/Project/_git/Repo; a user name before the host is dropped.
@@ -66,6 +93,18 @@ export const findPullUrl = (repo: AdoRepo, branch: string) =>
 export const evaluationsUrl = (repo: AdoRepo, projectId: string, id: number) =>
   `${projectUrl(repo)}/_apis/policy/evaluations?artifactId=` +
   `${encodeURIComponent(`vstfs:///CodeReview/CodeReviewId/${projectId}/${id}`)}&${POLICY_API}`
+// A PATCH queues the evaluation's build again, as the pull request's Re-queue button does.
+export const requeueUrl = (repo: AdoRepo, evaluationId: string) =>
+  `${projectUrl(repo)}/_apis/policy/evaluations/${encodeURIComponent(evaluationId)}?${POLICY_API}`
+
+const buildApi = (repo: AdoRepo, buildId: number) => `${projectUrl(repo)}/_apis/build/builds/${buildId}`
+export const buildUrl = (repo: AdoRepo, buildId: number) => `${buildApi(repo, buildId)}?${API}`
+export const buildWebUrl = (repo: AdoRepo, buildId: number) => `${projectUrl(repo)}/_build/results?buildId=${buildId}`
+export const timelineUrl = (repo: AdoRepo, buildId: number) => `${buildApi(repo, buildId)}/timeline?${API}`
+export const logsUrl = (repo: AdoRepo, buildId: number) => `${buildApi(repo, buildId)}/logs?${API}`
+// The id is the timeline record's log.id, not the step's place in the job.
+export const logUrl = (repo: AdoRepo, buildId: number, logId: number, startLine: number) =>
+  `${buildApi(repo, buildId)}/logs/${logId}?startLine=${startLine}&${API}`
 
 export const branchOfRef = (ref: string) => ref.replace(/^refs\/heads\//, '')
 
@@ -92,6 +131,8 @@ export function jsonOf<T>(response: AdoResponse): T {
   return JSON.parse(response.text) as T
 }
 
+const FAILED = ['rejected', 'broken']
+
 export function toPullRequest(
   raw: RawPullRequest,
   repo: AdoRepo,
@@ -102,6 +143,11 @@ export function toPullRequest(
   const enabled = evaluations.filter(one => one.configuration?.isEnabled !== false)
   const count = (statuses: string[]) => enabled.filter(one => statuses.includes(one.status)).length
   const status = raw.status === 'completed' || raw.status === 'abandoned' ? raw.status : 'active'
+  const failedBuilds = enabled.flatMap((one): FailedBuild[] =>
+    FAILED.includes(one.status) && typeof one.context?.buildId === 'number' && one.evaluationId !== undefined
+      ? [{ evaluationId: one.evaluationId, buildId: one.context.buildId }]
+      : [],
+  )
 
   return {
     id: raw.pullRequestId,
@@ -118,11 +164,67 @@ export function toPullRequest(
     changesRequestedBy: people.filter(reviewer => reviewer.vote === -5).map(reviewer => reviewer.displayName),
     checks: {
       passed: count(['approved']),
-      failed: count(['rejected', 'broken']),
+      failed: count(FAILED),
       running: count(['queued', 'running']),
     },
+    failedBuilds,
   }
 }
+
+// One failed build's key: a rerun of it that fails again is a new failure only once it was seen running.
+export const failureKey = (one: FailedBuild) => `${one.evaluationId}:${one.buildId}`
+
+// The failed steps of a build's timeline, in the order they ran. A job or stage counts only for the errors it
+// carries itself, such as no agent picking it up; otherwise it failed because a step in it did.
+export function failedStepsOf(records: readonly RawTimelineRecord[]) {
+  return records
+    .filter(record => record.result === 'failed')
+    .map(record => ({
+      record,
+      errors: (record.issues ?? [])
+        .filter(issue => issue.type === 'error' && typeof issue.message === 'string' && issue.message.trim() !== '')
+        .map(issue => (issue.message ?? '').trim())
+        .slice(0, ERRORS_PER_STEP),
+    }))
+    .filter(({ record, errors }) => record.type === 'Task' || errors.length > 0)
+    .sort((a, b) => (a.record.order ?? 0) - (b.record.order ?? 0))
+    .slice(0, FAILED_STEPS)
+}
+
+// Azure DevOps stamps each line with the time; Claude needs the text.
+const TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z ?/
+
+// A log answers as {count, value: lines} when JSON is asked for; a server that sends plain text is split.
+export function logLinesOf(response: AdoResponse) {
+  if (response.status < 200 || response.status >= 300) return []
+  try {
+    const { value } = JSON.parse(response.text) as { value?: unknown }
+    if (Array.isArray(value)) return value.map(String)
+  } catch {
+    // Plain text.
+  }
+
+  return response.text.split('\n')
+}
+
+export function tailOf(lines: readonly string[]) {
+  const text = lines
+    .map(line => line.replace(/\r$/, '').replace(TIMESTAMP, ''))
+    .slice(-LOG_TAIL_LINES)
+    .join('\n')
+    .trim()
+
+  return text.length > LOG_CHARS ? text.slice(-LOG_CHARS) : text
+}
+
+// Where a step's log tail starts: the first of its last LOG_TAIL_LINES lines.
+export const tailStart = (log: RawLog | undefined) => Math.max(1, (log?.lineCount ?? 0) - LOG_TAIL_LINES + 1)
+
+// What failed, in a form that stays the same when the same steps fail with the same first error again.
+export const signatureOf = (failures: readonly BuildFailure[]) =>
+  failures
+    .flatMap(failure => failure.steps.map(step => `${failure.definition}/${step.name}: ${step.errors[0] ?? ''}`))
+    .join('\n')
 
 export type Tone = 'merged' | 'error' | 'warning' | 'success' | 'quiet'
 

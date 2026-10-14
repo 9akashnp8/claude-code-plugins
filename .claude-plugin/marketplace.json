@@ -13,7 +13,7 @@
     {
       "name": "git-push",
       "source": "./plugins/git-push",
-      "description": "Pushes the branch and opens its Azure DevOps pull request from buttons above the prompt, then shows the pull request's status there."
+      "description": "Pushes the branch and opens its Azure DevOps pull request from buttons above the prompt, then shows the pull request's status there and hands a failed build to Claude to fix."
     },
     {
       "name": "worktree-hooks",

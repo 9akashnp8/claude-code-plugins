@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { mock } from 'claude-code/testing'
 
-import type { AuthMode, RawEvaluation, RawPullRequest } from '../hooks/ado'
+import type { AuthMode, RawEvaluation, RawPullRequest, RawTimelineRecord } from '../hooks/ado'
 
 export type Repo = {
   branch: string
@@ -22,6 +22,10 @@ export type Server = {
   evaluations: RawEvaluation[]
   // A POST of a pull request gets this answer instead of creating one.
   refuseCreate: { status: number; message: string } | null
+  // The builds the evaluations name, by id: the pipeline's name, its timeline, and each log's lines by log id.
+  builds: Record<number, { definition: string; records: RawTimelineRecord[]; logs: Record<number, string[]> }>
+  // The evaluations a PATCH queued again.
+  requeued: string[]
   requests: { auth: string; method: string; url: string; body: Record<string, unknown> | null }[]
 }
 
@@ -76,10 +80,22 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     remoteBranches: ['HEAD 0 0', 'feature/export 0 0', 'main 0 2'].join('\n'),
     ...start,
   }
-  const server: Server = { accepts: ['basic'], pulls: [], evaluations: [], refuseCreate: null, requests: [], ...serverStart }
+  const server: Server = {
+    accepts: ['basic'],
+    pulls: [],
+    evaluations: [],
+    refuseCreate: null,
+    builds: {},
+    requeued: [],
+    requests: [],
+    ...serverStart,
+  }
   const ran: string[] = []
   const toasts: string[] = []
   const prompts: string[] = []
+  // What the plugin submitted as turns of their own, and the notifications it raised.
+  const submitted: string[] = []
+  const notified: string[] = []
   const clock = mock.clock(on)
   const answer = (exitCode: number, stdout = '', stderr = '') => ({
     value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false },
@@ -95,6 +111,26 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
       const created = activePull({ pullRequestId: 101 + server.pulls.length, title: String(body?.title) })
       server.pulls.push(created)
       return json(201, created)
+    }
+    const requeue = url.match(/\/policy\/evaluations\/([^/?]+)\?/)
+    if (method === 'PATCH' && requeue !== null) {
+      server.requeued.push(decodeURIComponent(requeue[1] ?? ''))
+      return json(200, {})
+    }
+    const buildRoute = url.match(/\/_apis\/build\/builds\/(\d+)(\/timeline|\/logs\/(\d+)|\/logs)?\?(?:startLine=(\d+))?/)
+    if (buildRoute !== null) {
+      const build = server.builds[Number(buildRoute[1])]
+      if (build === undefined) return json(404, { message: `no build ${buildRoute[1]}` })
+      const [, , part, logId, startLine] = buildRoute
+      if (part === '/timeline') return json(200, { records: build.records })
+      if (part === '/logs') {
+        return json(200, { value: Object.entries(build.logs).map(([id, lines]) => ({ id: Number(id), lineCount: lines.length })) })
+      }
+      if (logId !== undefined) {
+        const lines = (build.logs[Number(logId)] ?? []).slice(Number(startLine ?? 1) - 1)
+        return json(200, { count: lines.length, value: lines })
+      }
+      return json(200, { id: Number(buildRoute[1]), definition: { name: build.definition } })
     }
     if (url.includes('/pullrequests?searchCriteria')) return json(200, { value: server.pulls.slice(-1) })
     if (!Number.isNaN(id)) return json(200, server.pulls.find(one => one.pullRequestId === id))
@@ -150,6 +186,16 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     toasts.push(e.text)
     return { value: undefined }
   })
+  on('prompt.submit', ($, e) => {
+    submitted.push(e.text)
+    return { text: e.text }
+  })
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('ui.notify', ($, e) => {
+    notified.push(e.text)
+    return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
+  })
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
   on('ui.close', () => ({ value: undefined }))
   // What the plugins beneath draw in the band, such as jira-log's line; else the engine's own, empty band.
@@ -157,5 +203,5 @@ export function fakeGit(on: On, start: Partial<Repo> = {}, { isBeneathDrawn = tr
     isBeneathDrawn ? $.ui.resolve(e).Box({ key: 'beneath' }) : { type: 'engine' as const, ref: 0 },
   )
 
-  return { repo, server, ran, toasts, prompts, clock }
+  return { repo, server, ran, toasts, prompts, submitted, notified, clock }
 }

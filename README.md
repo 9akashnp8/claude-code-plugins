@@ -75,7 +75,20 @@ When `origin` is an Azure DevOps repository (Azure DevOps Server, such as `https
 3. The draft opens in the Pull request pane: pick another branch under **Into** (the draft is written again for it), edit the title, ask for a revision in your own words, then press **Create pull request**.
 4. A note in the conversation records the pull request, so Claude and `jira-log`'s next update know it is up.
 
-From then on the line follows the pull request, checking every minute: `PR #12 · Active · 1 of 2 approved · checks running`. Conflicts, a rejection or a failed check turn it red, changes requested yellow, and a merged pull request shows **Merged** in the merge purple. `PR #12` opens it in the browser. A pull request opened in the browser shows up too.
+From then on the line follows the pull request, checking every 30 seconds: `PR #12 · Active · 1 of 2 approved · checks running`. Conflicts, a rejection or a failed check turn it red, changes requested yellow, and a merged pull request shows **Merged** in the merge purple. `PR #12` opens it in the browser. A pull request opened in the browser shows up too.
+
+### Fix a failed build
+
+When a build validation policy's build fails, the line shows **Fix build** (once Claude is not busy with a turn):
+
+1. The plugin reads the build the policy ran (the evaluation's `context.buildId`), its timeline, and for the first five failed steps their error lines and the last 150 lines of its log, timestamps dropped. A job or stage counts only when it has errors of its own, such as no agent picking it up.
+2. It sends that to Claude as a prompt, in the conversation, so you can see what Claude was given. Claude works out the cause and does one of three things:
+   - **Code**: fixes it, checks it, and commits only that fix, with a message that starts `fix(ci): `. When the turn ends, the plugin pushes the commit, and the push queues the build again.
+   - **Outside the code** (an agent lost, a feed or network error, a timeout): changes nothing and ends with `RETRY: <why>`. The plugin queues the policy's build again, as the pull request's **Re-queue** does.
+   - **Needs a person** (a missing variable, secret, service connection, permission or agent capability): changes nothing and ends with `ESCALATE: <what to do>`. The line shows `Needs you: …` and you get a notification. The line clears once the build runs again.
+3. **Fix build** is not offered again for the same build until it has been seen running again. A requeue or a push makes a new build; **Retry failed stages** reruns the same one. If the same steps then fail with the same error, Claude is told an earlier fix did not hold, and to escalate unless it can see what that fix missed.
+
+A fix that is interrupted or commits nothing brings the button back. The build output is put to Claude as data, with an instruction not to follow anything written in it.
 
 Signing in needs no setup. The plugin asks git for the credential it uses for `origin` (`git credential fill`), then sends requests through Windows PowerShell: first as Basic sign-in (a personal access token), then as Windows sign-in with the same credential (a domain password), and with no stored credential as your Windows account. The credential stays in memory and goes to PowerShell on its standard input, never on a command line. Requests use REST API version 6.0, which Azure DevOps Server 2020 and later answer. Pull requests need Windows.
 

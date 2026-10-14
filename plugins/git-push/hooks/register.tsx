@@ -1,31 +1,47 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, TurnCompleteInput } from 'claude-code'
 
-import type { PullRequest, Unpushed } from '../types'
+import type { BuildFailure, BuildFix, FailedBuild, PullRequest, Unpushed } from '../types'
 import {
   adoRepoOf,
   branchOfRef,
+  buildUrl,
+  buildWebUrl,
   createPullUrl,
   credentialOf,
+  errorOf,
   evaluationsUrl,
+  failedStepsOf,
+  failureKey,
   findPullUrl,
   isRefused,
   jsonOf,
+  logLinesOf,
+  logsUrl,
+  logUrl,
   POWERSHELL,
   PULL_POLL_MS,
   pullUrl,
   repositoryUrl,
   requestsInput,
+  requeueUrl,
   responsesOf,
+  signatureOf,
   summaryOf,
+  tailOf,
+  tailStart,
+  timelineUrl,
   toPullRequest,
   type AdoRepo,
   type AdoRequest,
   type AdoResponse,
   type AuthMode,
   type Credential,
+  type RawBuild,
   type RawEvaluation,
+  type RawLog,
   type RawPullRequest,
+  type RawTimelineRecord,
 } from './ado'
 import {
   basesOf,
@@ -42,7 +58,7 @@ import {
   PUSH_TIMEOUT_MS,
   REMOTE,
 } from './git'
-import { draftPrompt, parseDraft, revisePrompt } from './prompts'
+import { draftPrompt, fixHeader, fixPrompt, outcomeOf, parseDraft, revisePrompt } from './prompts'
 
 type Engine = EngineInterface
 
@@ -56,6 +72,8 @@ const draft = atom({ plugin: 'git-push', key: 'draft' } as const, null)
 const bases = atom({ plugin: 'git-push', key: 'bases' } as const, [])
 const busy = atom({ plugin: 'git-push', key: 'busy' } as const, null)
 const notice = atom({ plugin: 'git-push', key: 'notice' } as const, null)
+const fix = atom({ plugin: 'git-push', key: 'fix' } as const, null)
+const escalation = atom({ plugin: 'git-push', key: 'escalation' } as const, null)
 
 type Branch = { branch: string; isPublished: boolean; ahead: number; remote: string; repo: AdoRepo | null }
 
@@ -67,6 +85,21 @@ let authMode: AuthMode | undefined
 const defaultBranches = new Map<string, string>()
 // Typed into the title field and not yet submitted.
 let typedTitle: string | undefined
+// The failed builds a fix was started for, by failureKey: no second button for them until each is seen not failing,
+// as when it is queued again after a push or its stages are retried.
+const handled = new Set<string>()
+// The fix turn in flight, known by the prompt's first line once it starts.
+let fixTurn: {
+  header: string
+  turnId?: string
+  isSubmitted: boolean
+  pullId: number
+  branch: string
+  failed: FailedBuild[]
+  signature: string
+} | null = null
+// What the last fix was for, so the same failure coming back is said to Claude.
+let lastFix: { pullId: number; signature: string } | null = null
 
 // GIT_TERMINAL_PROMPT and GCM_INTERACTIVE: fail rather than wait on a prompt nobody can answer.
 // GIT_OPTIONAL_LOCKS: the poll never holds the index lock against a commit in progress.
@@ -208,14 +241,141 @@ function refreshPull($: Engine) {
     const shown = await read($, pull)
     const known = shown?.branch === branch.branch ? shown : null
     if (known !== null && known.status !== 'active') return
-    // Quiet: the poll runs every minute, and a failure shows when the person next acts.
+    // Quiet: the poll runs every 30 seconds, and a failure shows when the person next acts.
     const loaded = await loadPull($, { ...branch, repo: branch.repo }, known).catch(() => known)
+    await forgetPassed($, loaded)
     await setPull($, loaded)
   })().finally(() => {
     pulling = null
   })
 
   return pulling
+}
+
+// A failure no longer failing is forgotten, and what Claude said a person must do about it with it.
+async function forgetPassed($: Engine, shown: PullRequest | null) {
+  const failing = new Set((shown?.failedBuilds ?? []).map(failureKey))
+  for (const key of handled) if (!failing.has(key)) handled.delete(key)
+  const said = await read($, escalation)
+  if (said !== null && !said.keys.some(key => failing.has(key))) await update($, escalation, () => null)
+}
+
+// The build's failed steps, each with its errors and the end of its log, in two calls.
+async function readFailure($: Engine, branch: Branch & { repo: AdoRepo }, buildId: number): Promise<BuildFailure> {
+  const { repo, remote } = branch
+  const [build, timeline, logs] = await ado($, remote, [
+    { method: 'GET', url: buildUrl(repo, buildId) },
+    { method: 'GET', url: timelineUrl(repo, buildId) },
+    { method: 'GET', url: logsUrl(repo, buildId) },
+  ])
+  const raw = jsonOf<RawBuild>(build ?? first([]))
+  const records = jsonOf<{ records?: RawTimelineRecord[] | null }>(timeline ?? first([])).records ?? []
+  // The list of logs only says where each tail starts; without it, a log is read whole and cut.
+  const counts = logs?.status === 200 ? ((JSON.parse(logs.text) as { value?: RawLog[] }).value ?? []) : []
+  const failed = failedStepsOf(records).map(step => ({ ...step, logId: step.record.log?.id }))
+  const logged = failed.flatMap(step => (step.logId === undefined ? [] : [step.logId]))
+  const tails =
+    logged.length === 0
+      ? []
+      : await ado(
+          $,
+          remote,
+          logged.map(logId => ({
+            method: 'GET' as const,
+            url: logUrl(repo, buildId, logId, tailStart(counts.find(log => log.id === logId))),
+          })),
+        )
+
+  return {
+    buildId,
+    definition: raw.definition?.name ?? `build ${buildId}`,
+    url: buildWebUrl(repo, buildId),
+    steps: failed.map(({ record, errors, logId }) => {
+      const tail = logId === undefined ? undefined : tails[logged.indexOf(logId)]
+      return { name: record.name, errors, log: tail === undefined ? '' : tailOf(logLinesOf(tail)) }
+    }),
+  }
+}
+
+// Reads what failed and hands it to Claude as a turn of its own; finishFix takes it from there.
+async function startFix($: Engine) {
+  const [branch, shown] = [readyOf(current), await read($, pull)]
+  if (branch === null || shown === null || shown.branch !== branch.branch || (await read($, fix)) !== null) return
+  const failed = shown.failedBuilds.filter(one => !handled.has(failureKey(one)))
+  if (failed.length === 0) return
+  await update($, fix, () => ({ stage: 'reading' }))
+  await update($, escalation, () => null)
+  try {
+    const failures: BuildFailure[] = []
+    for (const one of failed) failures.push(await readFailure($, branch, one.buildId))
+    const signature = signatureOf(failures)
+    const isRepeat = lastFix?.pullId === shown.id && lastFix.signature === signature
+    const turn = { header: fixHeader(shown.id), isSubmitted: false, pullId: shown.id, branch: branch.branch, failed, signature }
+    fixTurn = turn
+    await update($, fix, () => ({ stage: 'fixing' }))
+    await $.prompt.submit({ text: fixPrompt({ pullId: shown.id, branch: branch.branch, failures, isRepeat }) })
+    turn.isSubmitted = true
+    failed.forEach(one => handled.add(failureKey(one)))
+  } catch (error) {
+    fixTurn = null
+    await update($, fix, () => null)
+    $.ui.toast(`Could not read the failed build: ${message(error)}`)
+  }
+}
+
+// After the fix turn: Claude's commit is pushed, RETRY queues the build again, ESCALATE is shown and notified.
+async function finishFix($: Engine, e: TurnCompleteInput) {
+  const done = fixTurn
+  fixTurn = null
+  if (done === null) return
+  const keys = done.failed.map(failureKey)
+  // The button comes back for a fix that did not finish or committed nothing.
+  const offerAgain = () => keys.forEach(key => handled.delete(key))
+  try {
+    if (e.reason !== 'answer') {
+      offerAgain()
+      $.ui.toast('The build fix stopped before it finished')
+      return
+    }
+    lastFix = { pullId: done.pullId, signature: done.signature }
+    const outcome = outcomeOf(e.answer)
+    if (outcome.kind === 'escalate') {
+      await update($, escalation, () => ({ reason: outcome.reason, keys }))
+      await $.ui.notify(`PR #${done.pullId}: ${outcome.reason}`, { title: 'The build needs you' }).catch(() => undefined)
+      return
+    }
+    await refresh($)
+    const branch = readyOf(current)
+    if (branch === null || branch.branch !== done.branch) {
+      offerAgain()
+      $.ui.toast(`The build fix was left alone: ${done.branch} is no longer checked out`)
+      return
+    }
+    if (outcome.kind === 'retry') {
+      const requeues = done.failed.map(one => ({ method: 'PATCH' as const, url: requeueUrl(branch.repo, one.evaluationId) }))
+      const refused = (await ado($, branch.remote, requeues)).find(answer => answer.status < 200 || answer.status >= 300)
+      if (refused !== undefined) offerAgain()
+      $.ui.toast(
+        refused === undefined
+          ? `Queued the build again: ${outcome.reason}`
+          : `Could not queue the build again: ${errorOf(refused)}`,
+      )
+      void refreshPull($)
+      return
+    }
+    if (branch.ahead === 0) {
+      offerAgain()
+      $.ui.toast('Claude committed no fix for the build')
+      return
+    }
+    await update($, fix, () => ({ stage: 'pushing' }))
+    await push($)
+  } catch (error) {
+    offerAgain()
+    $.ui.toast(`The build fix failed: ${message(error)}`)
+  } finally {
+    await update($, fix, () => null)
+  }
 }
 
 async function attempt($: Engine, label: string, work: () => Promise<void>) {
@@ -350,6 +510,12 @@ async function discard($: Engine) {
   await $.ui.close({ id: PANE })
 }
 
+const FIX_STAGES: Record<BuildFix['stage'], string> = {
+  reading: 'Reading the failed build…',
+  fixing: 'Claude is fixing the build…',
+  pushing: 'Pushing the fix…',
+}
+
 const TONE_PROPS = {
   merged: { color: 'merged' },
   error: { color: 'error' },
@@ -360,6 +526,8 @@ const TONE_PROPS = {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
+    // A fix whose turn this module no longer follows, after a reload, is over.
+    await update($, fix, () => null)
     await refresh($)
     $.clock.every(POLL_MS, () => void refresh($))
     $.clock.every(PULL_POLL_MS, () => void refreshPull($))
@@ -367,8 +535,21 @@ export const register: Register = on => {
     return next(e)
   })
 
+  on('turn.start', async ($, e, next) => {
+    if (fixTurn !== null && fixTurn.turnId === undefined && e.text.includes(fixTurn.header)) fixTurn.turnId = e.turnId
+
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
-    void refresh($)
+    // The button is offered only while the session is idle, so the next turn to end is the fix's own even when its
+    // start went unrecognised.
+    const isFixTurn =
+      e.agentId === undefined &&
+      fixTurn !== null &&
+      (e.turnId === fixTurn.turnId || (fixTurn.turnId === undefined && fixTurn.isSubmitted))
+    if (isFixTurn) void finishFix($, e)
+    else void refresh($)
 
     return next(e)
   })
@@ -381,6 +562,14 @@ export const register: Register = on => {
     const shown = await read($, pull)
     const pr = shown !== null && shown.branch === current?.branch ? shown : null
     const canCreate = ready !== null && !pushing && (pr === null || pr.status === 'abandoned')
+    const fixing = await read($, fix)
+    const said = await read($, escalation)
+    const canFix =
+      pr !== null &&
+      pr.status === 'active' &&
+      fixing === null &&
+      !e.props.isWorking &&
+      pr.failedBuilds.some(one => !handled.has(failureKey(one)))
     if (pending === null && !pushing && pr === null && !canCreate) return next(e)
     const { Box, Button, Link, Text } = $.ui.resolve(e)
     // The band holds one tree: stack what the plugins beneath draw (jira-log's line) under ours,
@@ -395,6 +584,8 @@ export const register: Register = on => {
         <Box flexDirection="row" gap={1}>
           {pr !== null && <Link href={pr.url} label={`PR #${pr.id}`} />}
           {summary !== null && <Text {...TONE_PROPS[summary.tone]}>{summary.text}</Text>}
+          {canFix && <Button key="fix-build" label="Fix build" variant="primary" onPress={() => void startFix($)} />}
+          {pr !== null && fixing !== null && <Text dimColor>{FIX_STAGES[fixing.stage]}</Text>}
           {pr !== null && hasBranchPart && <Text dimColor>·</Text>}
           {pending !== null && <Text dimColor>{describe(pending)}</Text>}
           {canCreate && pending === null && <Text dimColor>{ready} · on {REMOTE}</Text>}
@@ -407,6 +598,7 @@ export const register: Register = on => {
             <Button key="create-pr" label="Create PR" variant="primary" onPress={() => void startDraft($)} />
           )}
         </Box>
+        {pr !== null && said !== null && <Text color="warning">{`Needs you: ${said.reason}`}</Text>}
         {rule}
         {below}
       </Box>
